@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "celonis": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["celonis_mcp.py"]
+    }
+  }
+}

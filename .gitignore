@@ -1,0 +1,15 @@
+__pycache__/
+cache/
+*.pyc
+.venv/
+vendor/
+# Local tenant snapshots and generated benchmarks (never commit).
+celonis-index.json
+celonis-columns.json
+celonis-aliases.json
+celonis-eval.json
+celonis-map.json
+celonis-ui-map.json
+bench/
+bench-resolver.json
+.omp/mcp.json

@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Celonis resolver — Jev decides</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c232d; --line:#26303d; --line2:#334050;
+    --fg:#d8e0ea; --muted:#8b98a9; --dim:#697585;
+    --accent:#4da3ff; --ok:#3fbf7f; --warn:#e0b354; --bad:#ef6b6b; --pick:#4da3ff;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif}
+  a{color:var(--accent)}
+  header{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:baseline;
+         padding:18px 22px 14px;border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:16px;letter-spacing:.2px}
+  h1 small{color:var(--muted);font-weight:400;margin-left:8px}
+  .pills{display:flex;flex-wrap:wrap;gap:6px;margin-left:auto}
+  .pill{font:11px/1 var(--mono);color:var(--muted);border:1px solid var(--line2);
+        border-radius:999px;padding:4px 9px;white-space:nowrap}
+  .pill b{color:var(--fg);font-weight:600}
+  .pill.ok b{color:var(--ok)} .pill.warn b{color:var(--warn)} .pill.bad b{color:var(--bad)}
+  main{max-width:1120px;margin:0 auto;padding:18px 22px 80px}
+  form.ask{display:flex;gap:8px;margin-bottom:10px}
+  input[type=text]{flex:1;background:var(--panel);border:1px solid var(--line2);border-radius:8px;
+        color:var(--fg);padding:12px 14px;font:15px/1.4 inherit}
+  input[type=text]:focus{outline:none;border-color:var(--accent)}
+  button{background:var(--accent);color:#06111d;border:0;border-radius:8px;padding:12px 18px;
+         font:600 14px/1 inherit;cursor:pointer}
+  button.ghost{background:transparent;color:var(--fg);border:1px solid var(--line2);font-weight:500}
+  button:disabled{opacity:.5;cursor:default}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:18px}
+  .chip{background:var(--panel);border:1px solid var(--line);border-radius:999px;
+        padding:5px 11px;font-size:12px;color:var(--muted);cursor:pointer}
+  .chip:hover{border-color:var(--accent);color:var(--fg)}
+  .chip b{color:var(--fg);font-weight:600}
+  .chip .p{font-family:var(--mono);color:var(--dim);margin-left:6px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+        padding:16px 18px;margin-bottom:14px}
+  .card h2{margin:0 0 2px;font-size:19px;font-weight:600;letter-spacing:.1px}
+  .card h3{margin:0 0 10px;font-size:12px;font-weight:600;color:var(--muted);
+           text-transform:uppercase;letter-spacing:.9px}
+  .card .where{color:var(--muted);font-size:13px}
+  .badge{display:inline-block;font:11px/1 var(--mono);border-radius:5px;padding:3px 7px;
+         border:1px solid var(--line2);color:var(--muted);margin-right:6px;vertical-align:2px}
+  .badge.kind{color:var(--accent);border-color:#2a4a6b}
+  .badge.path{color:var(--fg);background:var(--panel2)}
+  .badge.warn{color:var(--warn);border-color:#5b4a20}
+  .badge.ok{color:var(--ok);border-color:#22503a}
+  .verdict-head{display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap}
+  .verdict-main{flex:1 1 420px;min-width:320px}
+  .conf{width:260px;flex:0 0 auto}
+  .conf .big{font:600 34px/1 var(--mono);letter-spacing:-.5px}
+  .conf .lbl{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.9px;margin:4px 0 8px}
+  .track{position:relative;height:9px;background:#0b0f14;border:1px solid var(--line);border-radius:5px;overflow:hidden}
+  .track>i{display:block;height:100%;background:linear-gradient(90deg,#2b6ea8,var(--accent))}
+  .track>i.low{background:linear-gradient(90deg,#6b5320,var(--warn))}
+  .track>i.none{background:#3a2020}
+  .ticks{position:relative;height:8px;margin-top:2px}
+  .ticks i{position:absolute;top:-12px;width:1px;height:14px;background:var(--line2)}
+  .legend{font:10px/1.4 var(--mono);color:var(--dim);margin-top:2px}
+  .url{display:block;font:12px/1.5 var(--mono);color:var(--accent);word-break:break-all;margin:8px 0 2px}
+  .stats{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+  .stat{font:11px/1 var(--mono);background:var(--panel2);border:1px solid var(--line);
+        border-radius:6px;padding:5px 8px;color:var(--muted)}
+  .stat b{color:var(--fg);font-weight:600}
+  .stat.warn b{color:var(--warn)} .stat.ok b{color:var(--ok)} .stat.bad b{color:var(--bad)}
+  .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;align-items:center}
+  .alts{margin-top:12px;font-size:13px;color:var(--muted)}
+  .alts .row{display:flex;gap:8px;align-items:baseline;padding:3px 0}
+  .alts .row .v{font:12px var(--mono);color:var(--fg);min-width:44px}
+  .banner{border-radius:8px;padding:10px 12px;margin-top:12px;font-size:13px}
+  .banner.warn{background:#241f12;border:1px solid #5b4a20;color:#f0d79a}
+  .banner.bad{background:#241314;border:1px solid #5c2b2b;color:#f3b0b0}
+  .banner.ok{background:#0f2318;border:1px solid #22503a;color:#a8e5c4}
+  .steps{counter-reset:s}
+  .step{border-left:2px solid var(--line2);padding:0 0 4px 16px;margin:0 0 16px 4px;position:relative}
+  .step:before{counter-increment:s;content:counter(s);position:absolute;left:-11px;top:-2px;
+    width:18px;height:18px;border-radius:50%;background:var(--panel2);border:1px solid var(--line2);
+    color:var(--muted);font:11px/18px var(--mono);text-align:center}
+  .step.hit:before{background:#123048;border-color:var(--accent);color:var(--accent)}
+  .step.sub{border-left-color:#1d2530;padding-left:0;margin-bottom:10px}
+  .step.sub:before{display:none}
+  .step h3{margin:0 0 8px;color:var(--fg);font-size:12px;text-transform:none;letter-spacing:.3px}
+  .step .note{color:var(--muted);font-size:12.5px;margin-bottom:8px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{text-align:left;color:var(--dim);font:600 10.5px/1 var(--mono);text-transform:uppercase;
+     letter-spacing:.7px;padding:0 8px 6px 0;border-bottom:1px solid var(--line)}
+  td{padding:5px 8px 5px 0;border-bottom:1px solid #1d2530;vertical-align:top}
+  tr.pick td{background:#132435}
+  td.n{font-family:var(--mono);color:var(--fg)}
+  td.dim{color:var(--muted)}
+  .slot{font:11px var(--mono);color:var(--dim)}
+  details{margin-top:8px}
+  summary{cursor:pointer;color:var(--muted);font-size:12.5px;user-select:none}
+  summary:hover{color:var(--fg)}
+  pre{background:#0b0f14;border:1px solid var(--line);border-radius:8px;padding:12px;
+      overflow:auto;max-height:460px;font:11.5px/1.55 var(--mono);color:#c9d5e4;margin:8px 0 0}
+  .bars{display:grid;gap:3px;margin:8px 0 0}
+  .barrow{display:grid;grid-template-columns:minmax(180px,42%) 1fr 60px;gap:8px;align-items:center;font-size:12px}
+  .barrow .bl{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .barrow.pick .bl{color:var(--fg);font-weight:600}
+  .barrow .bt{background:#0b0f14;border-radius:3px;height:8px;overflow:hidden}
+  .barrow .bt>i{display:block;height:100%;background:#3c5a78}
+  .barrow.pick .bt>i{background:var(--pick)}
+  .barrow .bv{font:11px var(--mono);color:var(--muted);text-align:right}
+  .barrow.pick .bv{color:var(--fg)}
+  .qhead{display:flex;gap:8px;align-items:baseline;margin-top:12px}
+  .qhead .k{font:12px var(--mono);color:var(--fg)}
+  .qhead .t{font:10.5px var(--mono);color:var(--dim)}
+  .qhead .c{font:12px var(--mono);color:var(--accent)}
+  .kv{display:grid;grid-template-columns:200px 1fr;gap:4px 14px;font-size:12.5px}
+  .kv .k{color:var(--dim);font-family:var(--mono);font-size:11.5px}
+  .kv .v{color:var(--fg);word-break:break-word}
+  .because{color:var(--muted);font-size:12.5px;margin:2px 0 6px}
+  .empty{color:var(--muted);font-size:13px}
+  #toast{position:fixed;right:18px;bottom:18px;max-width:420px;background:var(--panel2);
+         border:1px solid var(--line2);border-radius:9px;padding:12px 14px;font-size:13px;
+         display:none;box-shadow:0 8px 24px #0008}
+  #toast.show{display:block}
+  #toast .u{font:11.5px var(--mono);color:var(--accent);word-break:break-all;margin-top:5px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Celonis resolver <small>Jev decides, code computes</small></h1>
+  <div class="pills" id="pills"><span class="pill">loading…</span></div>
+</header>
+
+<main>
+  <form class="ask" id="form">
+    <input type="text" id="q" autocomplete="off" spellcheck="false"
+           placeholder="the view that shows tax credits by month">
+    <button type="submit" id="go">Resolve</button>
+  </form>
+  <div class="chips" id="chips"></div>
+  <div id="out"><div class="card empty">Ask for a place in the tenant. The page shows the
+    layers that answer before any model call, the candidates BM25 scored, the JSON of every
+    Jev request and answer, and the threshold the decision was taken with.</div></div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const f2 = v => (v === null || v === undefined) ? "—" : Number(v).toFixed(2);
+const f3 = v => (v === null || v === undefined) ? "—" : Number(v).toFixed(3);
+const json = o => esc(JSON.stringify(o, null, 1));
+const money = c => "$" + Number(c || 0).toFixed(5);
+
+let THRESHOLDS = {}, HISTORY = [], DEMOS = [], BASE = "", LAST = null;
+
+/* ---------- boot ---------- */
+async function boot() {
+  try {
+    const s = await (await fetch("/api/status")).json();
+    THRESHOLDS = s.thresholds || {};
+    BASE = s.base || "";
+    DEMOS = s.asks || [];
+    $("#pills").innerHTML = [
+      pill(`index <b>${esc((s.index.built || "?").slice(0, 16))}</b> · <b>${s.index.entries}</b> entries`),
+      pill(`columns <b>${esc((s.index.columns_built || "none").slice(0, 10))}</b>`),
+      pill(`vocabulary <b>${s.vocabulary.curated}</b> curated · <b>${s.vocabulary.learned}</b> learned`),
+      pill(`jev <b>${esc(s.jev.model)}</b>`, s.jev.key ? "ok" : "bad"),
+      pill(`key <b>${s.jev.key ? "set" : "missing"}</b>`, s.jev.key ? "ok" : "bad"),
+      pill(`chrome <b>${s.chrome.count}</b> tab${s.chrome.count === 1 ? "" : "s"}`,
+           s.chrome.count ? "ok" : "warn"),
+    ].join("");
+    chips();
+  } catch (e) {
+    $("#pills").innerHTML = pill(`status failed: ${esc(e.message)}`, "bad");
+  }
+}
+const pill = (html, cls = "") => `<span class="pill ${cls}">${html}</span>`;
+
+function chips() {
+  const seen = new Set(HISTORY.map(h => h.phrase));
+  $("#chips").innerHTML =
+    HISTORY.map(h =>
+      `<span class="chip" data-ask="${esc(h.phrase)}"><b>${esc(h.name || "refused")}</b>` +
+      `<span class="p">${h.conf === null || h.conf === undefined ? "" : f2(h.conf)}` +
+      `${h.path ? " · " + esc(h.path) : ""}</span></span>`).join("") +
+    DEMOS.filter(d => !seen.has(d)).map(d =>
+      `<span class="chip" data-ask="${esc(d)}">${esc(d)}</span>`).join("");
+}
+
+/* ---------- asking ---------- */
+async function ask(phrase, open) {
+  const btn = $("#go");
+  btn.disabled = true; btn.textContent = "Resolving…";
+  try {
+    const r = await fetch(`/api/${open ? "open" : "resolve"}?q=${encodeURIComponent(phrase)}`);
+    const payload = await r.json();
+    LAST = payload;
+    render(payload);
+    if (payload.open) toast(payload.open);
+    remember(phrase, payload.result);
+  } catch (e) {
+    $("#out").innerHTML = `<div class="card"><div class="banner bad">${esc(e.message)}</div></div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = "Resolve";
+  }
+}
+
+function remember(phrase, result) {
+  HISTORY = HISTORY.filter(h => h.phrase !== phrase);
+  HISTORY.unshift({phrase, name: result && result.name, conf: result && result.confidence,
+                   path: result && result.path});
+  HISTORY = HISTORY.slice(0, 8);
+  chips();
+}
+
+function toast(o) {
+  const t = $("#toast");
+  t.innerHTML = (o.error ? `<b>${esc(o.error)}</b>`
+    : `<b>opened in the signed-in tab</b>${o.learned ? " · phrase learned" : ""}`) +
+    `<div class="u">${esc(o.url || "")}</div>`;
+  t.classList.add("show");
+  clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove("show"), 6000);
+}
+
+/* ---------- render ---------- */
+function render(payload) {
+  const trail = payload.trail || {}, result = payload.result;
+  let html = "";
+  if (payload.error) {
+    html += `<div class="card"><h3>stopped</h3>
+      <div class="banner bad">${esc(payload.error)}</div></div>`;
+  }
+  if (result) html += verdict(result, trail);
+  html += trailSteps(trail, payload);
+  html += rawCard(payload);
+  $("#out").innerHTML = html;
+}
+
+function verdict(r, trail) {
+  const steps = trail.steps || [];
+  const det = steps.find(s => s.layer === "deterministic");
+  const signals = steps.find(s => s.layer === "signals") || {};
+  const conf = r.confidence;
+  const confClass = conf === null || conf === undefined ? "" :
+                    conf >= (THRESHOLDS.T_MATCH ?? .5) ? "" : "low";
+  const head = r.name
+    ? `<div class="verdict-head">
+         <div class="verdict-main">
+           <div>
+             <span class="badge path">${esc(r.path)}</span>
+             <span class="badge kind">${esc(r.kind || "")}</span>
+             ${r.pinned_to ? `<span class="badge">pinned to ${esc(r.pinned_to)}</span>` : ""}
+             ${r.weak ? `<span class="badge warn">promoted past a refusal</span>` : ""}
+           </div>
+           <h2>${esc(r.name)}</h2>
+           <div class="where">${esc([r.package, r.pool].filter(Boolean).join(" · ") ||
+                                    (det && det.entry && det.entry.container) || "")}</div>
+           <span class="url">${esc(r.url || "")}</span>
+         </div>
+         <div class="conf">
+           <div class="big">${conf === null || conf === undefined ? "—" : f2(conf)}</div>
+           <div class="lbl">match confidence</div>
+           <div class="track"><i class="${confClass}" style="width:${((conf || 0) * 100).toFixed(1)}%"></i></div>
+           <div class="ticks">
+             ${tick(THRESHOLDS.T_MATCH_WEAK)}${tick(THRESHOLDS.T_PROMOTE)}${tick(THRESHOLDS.T_MATCH)}
+           </div>
+           <div class="legend">floor ${f2(THRESHOLDS.T_MATCH_WEAK)} · promote ${f2(THRESHOLDS.T_PROMOTE)} · act ${f2(THRESHOLDS.T_MATCH)}</div>
+         </div>
+       </div>`
+    : `<div>
+         <span class="badge path">${esc(r.path)}</span>
+         <h2>${esc(r.reason || "no match")}</h2>
+         <div class="where">${esc(r.hint || "")}</div>
+       </div>`;
+  const banner = !r.name
+    ? `<div class="banner bad">Nothing to open. The candidates and the model's probabilities below say why.</div>`
+    : r.calls === 0
+      ? `<div class="banner ok">Answered without a model call — <b>${esc(r.path)}</b>${
+          r.url ? ", and it has an address." : ", but the name search returns no addressable URL."}</div>`
+      : r.confirm
+        ? `<div class="banner warn"><b>Confirm first.</b> ${esc(r.weak
+            ? "The model refused and code promoted a candidate anyway — the promotion sits on the coin-flip side of the threshold."
+            : `Confidence ${f2(conf)} is below ${f2(THRESHOLDS.T_MATCH)}, or the runner-up is within ${f2(THRESHOLDS.T_MARGIN)}.`)}</div>`
+        : `<div class="banner ok">Grounded: ${r.grounded ? "yes" : "no"} — the model ${
+            r.grounded ? "agrees the candidate list holds it" : "does not confirm the list holds it"}.</div>`;
+  const alts = (r.alternatives || []).length
+    ? `<div class="alts"><b>Did you mean</b>` + r.alternatives.map(a =>
+        `<div class="row"><span class="v">${f2(a.prob)}</span>
+         <span>[${esc(a.kind)}] ${esc(a.name)}</span></div>`).join("") + `</div>` : "";
+  const stats = [
+    stat("p(none)", f2(r.p_none), r.p_none >= (THRESHOLDS.T_NONE ?? .5) ? "bad" : ""),
+    stat("exists", f2(r.exists)),
+    stat("intent", r.intent || "—"),
+    stat("margin", r.margin === undefined ? "—" : f3(r.margin)),
+    stat("path", r.path),
+    stat("calls", r.calls),
+    stat("tokens", r.tokens),
+    stat("cost", money(r.cost)),
+    stat("ms", Math.round(r.ms)),
+    r.calls ? (r.cached ? stat("cache", "hit", "ok") : stat("cache", "miss")) : "",
+    stat("implied kind", (signals.implied_kind || "—")),
+  ].join("");
+  const actions = r.url ? `<div class="actions">
+      <button data-open="${esc(r.phrase)}">${r.confirm ? "Open anyway" : "Open in signed-in Chrome"}</button>
+      <button class="ghost" data-copy="${esc(r.url)}">Copy URL</button>
+      <a class="chip" href="${esc(absolute(r.url))}" target="_blank" rel="noreferrer">Open in a new tab</a>
+    </div>` : "";
+  return `<div class="card">${head}${banner}<div class="stats">${stats}</div>${actions}${alts}</div>`;
+}
+const stat = (k, v, cls = "") => `<span class="stat ${cls}">${esc(k)} <b>${esc(v)}</b></span>`;
+const tick = v => v === undefined ? "" : `<i style="left:${(v * 100).toFixed(1)}%"></i>`;
+const absolute = u => !u ? "" : (u.startsWith("http") ? u : BASE + u);
+
+/* ---------- the trail ---------- */
+function trailSteps(trail, payload) {
+  const passes = trail.passes || [];
+  let n = 0, html = "";
+  const wrap = (title, body, hit) => {
+    n++;
+    return `<div class="step ${hit ? "hit" : ""}"><h3>${title}</h3>${body}</div>`;
+  };
+  const steps = trail.steps || [];
+  const signals = steps.find(s => s.layer === "signals");
+  if (signals) {
+    html += wrap("Signals code read from the ask — no model",
+      `<div class="kv">
+         <div class="k">tokens</div><div class="v">${(signals.tokens || []).map(t =>
+            `<span class="badge">${esc(t)}</span>`).join("") || "—"}</div>
+         <div class="k">kind word</div><div class="v">${esc(signals.implied_kind || "none named")}</div>
+         <div class="k">containers named</div><div class="v">${(signals.containers || []).map(c =>
+            `${esc(c.name)} <span class="slot">[${esc(c.kind)}]</span>`).join(", ") || "none"}</div>
+         <div class="k">vocabulary hits</div><div class="v">${(signals.aliases || []).map(a =>
+            `“${esc(a.phrase)}” <span class="slot">${esc(a.source)} → ${esc(a.target || "container")}</span>`
+            ).join("<br>") || "none"}</div>
+       </div>`, (signals.aliases || []).length > 0);
+  }
+  const det = steps.find(s => s.layer === "deterministic");
+  if (det) {
+    html += wrap(`Answered by code alone: <span class="badge path">${esc(det.path)}</span> ` +
+      `<span class="slot">${esc(det.why)}</span>`,
+      `<div class="note">No judgment was needed, so no model call was made.</div>
+       <div class="kv"><div class="k">entry</div><div class="v">[${esc(det.entry.kind)}]
+         ${esc(det.entry.name)}</div>
+       <div class="k">url</div><div class="v">${esc(det.entry.url)}</div></div>`, true);
+  }
+  const named = steps.find(s => s.layer === "named_lookup");
+  if (named) {
+    html += wrap(`Tenant name search <span class="slot">/package-manager/api/search — no model</span>`,
+      named.count
+        ? `<table><tr><th>name</th><th>kind</th></tr>` + named.results.map(r =>
+            `<tr><td class="n">${esc(r.name)}</td><td class="dim">${esc(r.kind || "")}</td></tr>`).join("") +
+          `</table>` + (named.count > named.results.length
+            ? `<div class="note">${named.count - named.results.length} more not shown.</div>` : "")
+        : `<div class="note">No hit. Only one hit answers without a judgment, so a list of
+           several still goes to the shortlist.</div>`, named.count === 1);
+  }
+  const short = steps.find(s => s.layer === "shortlist");
+  if (short) {
+    html += wrap(`Shortlist — BM25 over ${(trail.index || {}).entries} entries, no model`,
+      short.candidates.length ? shortTable(short.candidates, passes[0]) :
+        `<div class="note">Nothing in the index shares a word with the ask. Columns and PQL are
+         not indexed, so the phrase may still name something real — \`celonis uses\` searches those.</div>`,
+      !!short.candidates.length);
+  }
+  passes.forEach((p, i) => {
+    html += wrap(`Jev call ${p.n} — <span class="slot">${p.k} candidates · ${esc(p.reason)} ·
+      ${p.latency_s}s${p.cached ? " · cache hit, $0" : ""}</span>`,
+      answerBlocks(p), true);
+  });
+  const post = trail.post || [];
+  if (post.length) html += wrap("Code applied the thresholds", postTable(post), false);
+  return `<div class="card steps">${html || `<div class="empty">No steps.</div>`}</div>`;
+}
+
+function shortTable(cands, pass) {
+  const probs = pass && pass.answers && pass.answers.match && pass.answers.match.probabilities;
+  const pick = pass && pass.answers && pass.answers.match.choice;
+  return `<table><tr><th>slot</th><th>entry</th><th>kind</th><th>context</th>
+    <th>bm25</th><th>boost</th><th>model p</th></tr>` +
+    cands.map(c => `<tr class="${pass && pick === c.slot ? "pick" : ""}">
+      <td class="slot">${esc(c.slot)}</td>
+      <td class="n">${esc(c.name)}${c.alias ? ` <span class="slot">alias: ${esc(c.alias.join(" "))}</span>` : ""}
+        ${c.hint ? `<div class="slot">${esc(c.hint)}</div>` : ""}</td>
+      <td class="dim">${esc(c.kind)}</td>
+      <td class="dim">${esc(c.context || "")}</td>
+      <td class="n">${f2(c.score)}</td>
+      <td class="n">${c.boost ? "+" + f2(c.boost) : "—"}</td>
+      <td class="n">${probs && probs[c.slot] !== undefined ? f3(probs[c.slot]) : "—"}</td>
+    </tr>`).join("") + `</table>`;
+}
+
+function answerBlocks(p) {
+  const labels = key => {
+    const q = (p.questions || {})[key] || {}, map = {};
+    for (const [k, v] of Object.entries(q.criteria || {})) if (v) map[k] = `${k} — ${v}`;
+    if (key === "match") {
+      for (const c of p.candidates || []) map[c.slot] = `${c.name} [${c.kind}]`;
+      map["none"] = "nothing in this list is what the request refers to";
+    }
+    return map;
+  };
+  let out = `<div class="note">One call, four questions. The state and the questions are what
+    Jev was sent; the answers are what came back, with every probability.</div>`;
+  for (const [key, a] of Object.entries(p.answers || {})) {
+    const isPick = a.type === "choice";
+    out += `<div class="qhead"><span class="k">${esc(key)}</span>
+      <span class="t">${esc(a.type)}</span>
+      ${isPick ? `<span class="c">choice ${esc(a.choice)} · confidence ${f2(a.confidence)}</span>`
+               : `<span class="c">noul ${f3(a.noul)}</span>`}</div>`;
+    if (isPick && a.probabilities)
+      out += bars(a.probabilities, labels(key), a.choice);
+    else if (!isPick)
+      out += bars({yes: a.noul, no: 1 - a.noul}, {yes: "yes", no: "no"},
+                  a.noul >= .5 ? "yes" : "no");
+  }
+  out += `<details><summary>request state sent to Jev (${JSON.stringify(p.state || {}).length} chars)</summary>
+    <pre>${json(p.state)}</pre></details>
+    <details><summary>questions sent to Jev</summary><pre>${json(p.questions)}</pre></details>
+    <details><summary>answers as returned</summary><pre>${json(p.answers)}</pre></details>`;
+  return out;
+}
+
+function bars(probs, labels, chosen) {
+  const rows = Object.entries(probs).sort((a, b) => b[1] - a[1]);
+  return `<div class="bars">` + rows.map(([k, v]) =>
+    `<div class="barrow ${k === chosen ? "pick" : ""}">
+       <span class="bl">${esc(labels[k] || k)}</span>
+       <span class="bt"><i style="width:${(v * 100).toFixed(1)}%"></i></span>
+       <span class="bv">${Number(v).toFixed(3)}</span>
+     </div>`).join("") + `</div>`;
+}
+
+function postTable(post) {
+  return post.map(p => {
+    const rows = Object.entries(p).filter(([k]) => k !== "rule").map(([k, v]) => {
+      let val;
+      if (k === "ranked") val = (v || []).map(r =>
+        `${esc(r.slot)} ${esc(r.name)} <span class="slot">${f3(r.prob)}</span>`).join(" · ");
+      else if (Array.isArray(v)) val = v.length ? v.map(x => esc(typeof x === "string" ? x : JSON.stringify(x))).join(", ") : "none";
+      else if (v && typeof v === "object") val = `<span class="slot">${esc(JSON.stringify(v))}</span>`;
+      else if (typeof v === "boolean") val = v ? "yes" : "no";
+      else val = esc(v);
+      return `<div class="k">${esc(k)}</div><div class="v">${val}</div>`;
+    }).join("");
+    return `<div class="step sub"><h3>${esc(p.rule)}</h3>
+      ${p.because ? `<div class="because">${esc(p.because)}</div>` : ""}
+      <div class="kv">${rows}</div></div>`;
+  }).join("");
+}
+
+function rawCard(payload) {
+  return `<div class="card"><h3>Raw JSON</h3>
+    <details open><summary>result — the dict \`celonis resolve --json\` prints</summary>
+      <pre>${json(payload.result)}</pre></details>
+    <details><summary>trail — every step, both Jev calls included</summary>
+      <pre>${json(payload.trail)}</pre></details>
+    ${payload.open ? `<details><summary>open</summary><pre>${json(payload.open)}</pre></details>` : ""}
+  </div>`;
+}
+
+/* ---------- wiring ---------- */
+$("#form").addEventListener("submit", e => {
+  e.preventDefault();
+  const phrase = $("#q").value.trim();
+  if (phrase) ask(phrase, false);
+});
+document.addEventListener("click", e => {
+  const chip = e.target.closest(".chip[data-ask]");
+  if (chip) { $("#q").value = chip.dataset.ask; ask(chip.dataset.ask, false); return; }
+  const open = e.target.closest("button[data-open]");
+  if (open) { ask(open.dataset.open, true); return; }
+  const copy = e.target.closest("button[data-copy]");
+  if (copy) { navigator.clipboard.writeText(copy.dataset.copy); toast({url: copy.dataset.copy}); }
+});
+boot();
+</script>
+</body>
+</html>
