@@ -7,7 +7,8 @@ this, so adding a flag does not add a parsing idiom.
 
 from __future__ import annotations
 
-VALUE_FLAGS = ("--pool", "--job", "--task", "--limit", "--promote", "--why", "--port", "--label", "--id")
+VALUE_FLAGS = ("--pool", "--job", "--task", "--limit", "--promote", "--why", "--port", "--label", "--id",
+               "--budget")
 
 
 def parse_argv(argv: list[str]) -> tuple[list[str], dict]:

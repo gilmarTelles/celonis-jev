@@ -7,7 +7,7 @@ resolver searches, and prints what it holds.
   python3 celonis_index.py            # refresh and summarise
   python3 celonis_index.py --quiet    # refresh only
   python3 celonis_index.py --embed    # embed the current index for semantic search (resumable)
-  python3 celonis_index.py --describe # describe each item for semantic search (claude CLI, ~$2.6)
+  python3 celonis_index.py --describe [--budget 3]  # describe each item for semantic search (claude CLI)
 
 A normal refresh also embeds new entries when a local Ollama answers (see celonis_embed).
 """
@@ -299,7 +299,15 @@ def add_columns(doc: dict, snap: dict) -> int:
 def main() -> None:
     _, opts = cliargs.parse_argv(sys.argv[1:])
     if "--describe" in opts:
-        celonis_describe.describe(json.loads(OUT.read_text())["entries"])
+        try:
+            budget = float(cliargs.flag(opts, "--budget") or celonis_describe.BUDGET_USD)
+        except ValueError:
+            raise SystemExit("--budget takes a dollar amount, e.g. --budget 3")
+        entries = json.loads(OUT.read_text())["entries"]
+        celonis_describe.describe(entries, budget)
+        print("embedding the descriptions (skipped without Ollama; then run "
+              "`python3 celonis_index.py --embed`)")
+        celonis_embed.embed_index(entries, required=False)
         return
     if "--embed" in opts:
         celonis_embed.embed_index(json.loads(OUT.read_text())["entries"])
