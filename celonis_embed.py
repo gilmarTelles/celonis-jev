@@ -34,6 +34,8 @@ from pathlib import Path
 
 import requests
 
+from celonis_describe import load_descriptions
+
 URL = os.environ.get("CELONIS_EMBED_URL", "http://localhost:11434").rstrip("/")
 MODEL = os.environ.get("CELONIS_EMBED_MODEL", "mxbai-embed-large")
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "  # mxbai's retrieval prompt
@@ -86,25 +88,6 @@ def words(name: str) -> str:
     """CustomObjectName / SNAKE_CASE / kebab-case -> plain words, stopwords kept."""
     s = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name or "")
     return re.sub(r"[_\-./]+", " ", s).strip()
-
-
-def descriptions_path(built: str) -> Path:
-    """Generated descriptions for the index built at `built`; a rebuilt index drops stale ones."""
-    return CACHE / f"descriptions-{built.replace(':', '-')}.json"
-
-
-def load_descriptions(built: str) -> dict[tuple[str, str], str]:
-    """What each (kind, name) is for, from `celonis_index.py --describe`; empty when absent."""
-    try:
-        items = json.loads(descriptions_path(built).read_text())["items"]
-    except (OSError, ValueError, TypeError, KeyError):
-        return {}
-    out = {}
-    for key, d in items.items():
-        kind, _, name = key.partition("\t")
-        if isinstance(d, dict) and isinstance(d.get("description"), str) and d["description"].strip():
-            out[(kind, name)] = d["description"].strip()
-    return out
 
 
 def entry_text(e: dict, descriptions: dict[tuple[str, str], str] | None = None) -> str:

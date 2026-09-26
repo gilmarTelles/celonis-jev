@@ -15,14 +15,12 @@ A normal refresh also embeds new entries when a local Ollama answers (see celoni
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
-import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import celonis_api as api
+import celonis_describe
 import celonis_embed
 import celonis_types
 import cliargs
@@ -298,117 +296,10 @@ def add_columns(doc: dict, snap: dict) -> int:
     return n
 
 
-DESCRIBE_SYSTEM = ("You describe items in a Celonis process-mining tenant for a search index. "
-                   "Answer with strict JSON only, no prose, no code fences.")
-DESCRIBE_ASK = """For each item below, write what a business user would say when looking for it.
-Use ONLY the item's own metadata. Return a JSON array with one object per item:
-{"i": <the item's i>, "d": "<one plain-English sentence: what it is and what it is for>",
- "k": [8 to 15 search keywords or short phrases a business user might type]}
-Keywords: synonyms, the business concept, English glosses of non-English names, and the
-expansion of abbreviations (GL, AP, AR, PO, SAP table codes such as BKPF or BSEG) only
-when you are confident. Do not invent facts the metadata does not support.
-
-Items:
-"""
-DESCRIBE_BATCH = 50
-DESCRIBE_BUDGET_USD = 3.0
-
-
-def _describe_items(entries: list[dict]) -> list[dict]:
-    """One compact metadata record per (kind, name): the only thing the model sees."""
-    groups: dict[tuple[str, str], list[dict]] = {}
-    for e in entries:
-        groups.setdefault((e["kind"], e["name"]), []).append(e)
-    items = []
-    for (kind, name), es in groups.items():
-        e = es[0]
-        where = sorted({c for x in es for c in (x.get("package"), x.get("pool"), x.get("space"),
-                                                 x.get("app")) if c})[:3]
-        item = {"kind": kind, "name": name, "in": where}
-        detail = e.get("columns") or e.get("fields")
-        if isinstance(detail, str):
-            detail = detail.strip("[]").replace("'", "").split(", ")
-        if detail:
-            item["columns"] = list(detail)[:30]
-        for k in ("key", "pql", "hint"):
-            if e.get(k) and e[k] != name:
-                item[k] = str(e[k])[:200]
-        items.append(item)
-    return items
-
-
-def _describe_batch(batch: list[dict], model: str) -> tuple[dict, float]:
-    """Ask the claude CLI for one batch; the answer keyed by (kind, name), and its cost.
-
-    The CLI runs in an empty directory with no tools and no settings, so the
-    item metadata in the prompt is all it can read.
-    """
-    payload = [dict(it, i=i) for i, it in enumerate(batch)]
-    with tempfile.TemporaryDirectory() as cwd:
-        run = subprocess.run(
-            ["claude", "-p", "--model", model, "--output-format", "json", "--tools", "",
-             "--no-session-persistence", "--setting-sources", "", "--system-prompt", DESCRIBE_SYSTEM],
-            input=DESCRIBE_ASK + json.dumps(payload, ensure_ascii=False), cwd=cwd,
-            capture_output=True, text=True, timeout=600)
-    out = json.loads(run.stdout)
-    cost = float(out.get("total_cost_usd") or 0)
-    text = out.get("result") or ""
-    rows = json.loads(text[text.index("["):text.rindex("]") + 1])
-    got = {}
-    for r in rows:
-        it = batch[int(r["i"])]
-        if isinstance(r.get("d"), str) and isinstance(r.get("k"), list):
-            got[f"{it['kind']}\t{it['name']}"] = {"description": r["d"],
-                                                  "keywords": [str(k) for k in r["k"]][:15]}
-    return got, cost
-
-
-def describe(model: str = "haiku", workers: int = 6) -> Path:
-    """Generate search descriptions for the current index into cache/.
-
-    Resumable: items already in the file are skipped, so a rerun after a failed
-    or over-budget run only pays for what is missing.
-    """
-    doc = json.loads(OUT.read_text())
-    path = celonis_embed.descriptions_path(doc["built"])
-    path.parent.mkdir(exist_ok=True)
-    try:
-        store = json.loads(path.read_text())
-    except Exception:
-        store = {"built": doc["built"], "model": model, "cost_usd": 0.0, "seconds": 0.0, "items": {}}
-    todo = [it for it in _describe_items(doc["entries"])
-            if f"{it['kind']}\t{it['name']}" not in store["items"]]
-    batches = [todo[i:i + DESCRIBE_BATCH] for i in range(0, len(todo), DESCRIBE_BATCH)]
-    started, failed = time.time(), 0
-    print(f"{len(todo)} items to describe in {len(batches)} batches with {model}")
-
-    def one(batch: list[dict]) -> tuple[dict, float]:
-        if store["cost_usd"] >= DESCRIBE_BUDGET_USD:
-            return {}, 0.0
-        for _ in range(2):
-            try:
-                return _describe_batch(batch, model)
-            except Exception:
-                continue
-        return {}, 0.0
-
-    with ThreadPoolExecutor(workers) as pool:
-        for got, cost in pool.map(one, batches):
-            failed += not got
-            store["items"].update(got)
-            store["cost_usd"] = round(store["cost_usd"] + cost, 4)
-            path.write_text(json.dumps(store, indent=1, ensure_ascii=False))
-    store["seconds"] = round(store["seconds"] + time.time() - started, 1)
-    path.write_text(json.dumps(store, indent=1, ensure_ascii=False))
-    print(f"{len(store['items'])} described -> {path} (${store['cost_usd']:.2f}, "
-          f"{store['seconds']:.0f} s, {failed} batches failed or skipped)")
-    return path
-
-
 def main() -> None:
     _, opts = cliargs.parse_argv(sys.argv[1:])
     if "--describe" in opts:
-        describe()
+        celonis_describe.describe(json.loads(OUT.read_text()))
         return
     if "--embed" in opts:
         doc = json.loads(OUT.read_text())
