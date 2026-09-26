@@ -184,7 +184,7 @@ def serve(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
 
 def main() -> int:
     _args, opts = cliargs.parse_argv(sys.argv[1:])
-    port = int(cliargs.flag(opts, "--port") or DEFAULT_PORT)
+    port = cliargs.number(opts, "--port", DEFAULT_PORT)
     serve(port, open_browser="--no-open" not in opts)
     return 0
 
