@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# Drive celonis-jev the way a user does and keep the evidence outside the checkout.
+#
+#   verify-celonis start                          new run: lock, evidence dir, state snapshot
+#   verify-celonis doctor                         is this checkout worth driving?
+#   verify-celonis cli <label> -- <cli args...>   python3 celonis_cli.py <args>, captured
+#   verify-celonis view-start                     loopback trace page on a free port
+#   verify-celonis view-get <label> <path?query>  GET against the running page, captured
+#   verify-celonis mcp <label> <tool> [json-args] one MCP tools/call over stdio, captured
+#   verify-celonis mcp-bare <label> <tool> [json]  the same with no Jev key and an empty HOME
+#   verify-celonis cleanup                        stop what this run started, restore state
+#
+# Evidence: $VERIFY_CELONIS_HOME/runs/<run-id>/  (default ~/.cache/verify-celonis).
+# It holds tenant names and URLs, so it never goes inside the repository.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+HOME_DIR="${VERIFY_CELONIS_HOME:-$HOME/.cache/verify-celonis}"
+LOCK="$REPO/cache/.verify-celonis.lock"
+LEARNED="$REPO/cache/aliases-learned.json"
+CURATED="$REPO/celonis-aliases.json"
+
+die() { echo "verify-celonis: $*" >&2; exit 2; }
+
+run_dir() {
+  local id="${VERIFY_CELONIS_RUN:-}"
+  [[ -z "$id" && -f "$HOME_DIR/current" ]] && id="$(cat "$HOME_DIR/current")"
+  [[ -n "$id" && -d "$HOME_DIR/runs/$id" ]] || die "no active run; run: verify-celonis start"
+  echo "$HOME_DIR/runs/$id"
+}
+
+hash_of() { [[ -f "$1" ]] && shasum -a 256 "$1" | cut -c1-16 || echo "absent"; }
+
+state_line() { echo "learned=$(hash_of "$LEARNED") curated=$(hash_of "$CURATED")"; }
+
+cmd_start() {
+  mkdir -p "$REPO/cache" "$HOME_DIR/runs"
+  if [[ -f "$LOCK" ]]; then
+    local other; other="$(cat "$LOCK")"
+    die "run $other holds $LOCK; finish it with 'verify-celonis cleanup' (or remove the lock if that run is dead)"
+  fi
+  local id; id="$(date +%Y%m%d-%H%M%S)-$$"
+  local dir="$HOME_DIR/runs/$id"
+  mkdir -p "$dir/state"
+  echo "$id" > "$LOCK"
+  echo "$id" > "$HOME_DIR/current"
+  for f in "$LEARNED" "$CURATED"; do [[ -f "$f" ]] && cp "$f" "$dir/state/"; done
+  { echo "run $id"; echo "repo $REPO"; echo "rev $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo none)";
+    echo "dirty $(git -C "$REPO" status --porcelain 2>/dev/null | wc -l | tr -d ' ') files"; echo "before $(state_line)"; } > "$dir/run.txt"
+  echo "$dir"
+}
+
+cmd_doctor() {
+  local dir; dir="$(run_dir)"
+  local out="$dir/doctor.txt"
+  (cd "$REPO" && python3 celonis_cli.py doctor) > "$out" 2>&1 || true
+  cat "$out"
+  local hard browser
+  hard="$(grep '^FAIL' "$out" | grep -v -e 'no CDP browser' -e 'login page' -e 'resolve/open degraded' || true)"
+  if grep -q -e '^FAIL.*no CDP browser' -e '^FAIL.*login page' -e '^WARN.*no tab on the tenant' "$out"; then browser=no; else browser=yes; fi
+  echo "--"
+  echo "evidence  $dir"
+  echo "browser   $browser  (open/read/view Open need a signed-in debug Chrome on :9222)"
+  if [[ -n "$hard" ]]; then echo "verdict   NOT DRIVABLE"; echo "$hard"; exit 1; fi
+  echo "verdict   drivable (search, resolve, ask without browser, tables, table, query, view, mcp)"
+}
+
+capture() {  # capture <dir> <label> <command...>
+  local dir="$1" label="$2"; shift 2
+  local before after code=0
+  before="$(state_line)"
+  printf '%q ' "$@" > "$dir/$label.cmd"; echo >> "$dir/$label.cmd"
+  (cd "$REPO" && "$@") > "$dir/$label.stdout" 2> "$dir/$label.stderr" || code=$?
+  after="$(state_line)"
+  echo "$code" > "$dir/$label.exit"
+  { echo "before $before"; echo "after  $after"; [[ "$before" == "$after" ]] && echo "vocabulary unchanged" || echo "VOCABULARY CHANGED"; } > "$dir/$label.state"
+  cat "$dir/$label.stdout"
+  [[ -s "$dir/$label.stderr" ]] && { echo "-- stderr"; cat "$dir/$label.stderr"; }
+  echo "-- exit $code  ($(tail -1 "$dir/$label.state"))  evidence $dir/$label.*"
+  return 0
+}
+
+cmd_cli() {
+  local label="${1:-}"; shift || true
+  [[ -n "$label" && "${1:-}" == "--" ]] || die "usage: verify-celonis cli <label> -- <celonis_cli args...>"
+  shift
+  capture "$(run_dir)" "$label" python3 celonis_cli.py "$@"
+}
+
+cmd_view_start() {
+  local dir; dir="$(run_dir)"
+  [[ -f "$dir/view.pid" ]] && kill -0 "$(cat "$dir/view.pid")" 2>/dev/null && die "view already running: $(cat "$dir/view.url")"
+  local port; port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+  # Own session: agent shells kill the caller's process group when a command returns.
+  python3 -c 'import subprocess,sys
+log = open(sys.argv[2], "w")
+p = subprocess.Popen([sys.executable, "celonis_view.py", "--port", sys.argv[3], "--no-open"], cwd=sys.argv[1],
+                     stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+print(p.pid)' "$REPO" "$dir/view.log" "$port" > "$dir/view.pid"
+  echo "http://127.0.0.1:$port" > "$dir/view.url"
+  for _ in $(seq 1 60); do
+    if curl -fsS "http://127.0.0.1:$port/api/status" -o "$dir/view-status.json" 2>/dev/null; then
+      echo "view ready  http://127.0.0.1:$port/  pid $(cat "$dir/view.pid")"; return 0
+    fi
+    kill -0 "$(cat "$dir/view.pid")" 2>/dev/null || { cat "$dir/view.log"; die "view exited before answering"; }
+    sleep 0.5
+  done
+  die "view did not answer /api/status within 30 s; see $dir/view.log"
+}
+
+cmd_view_get() {
+  local label="${1:-}" path="${2:-}"
+  [[ -n "$label" && -n "$path" ]] || die "usage: verify-celonis view-get <label> </api/...?q=...>"
+  local dir; dir="$(run_dir)"
+  [[ -f "$dir/view.url" ]] || die "no view in this run; run: verify-celonis view-start"
+  capture "$dir" "$label" curl -sS -w '\nhttp %{http_code}\n' "$(cat "$dir/view.url")$path"
+}
+
+cmd_mcp() {  # cmd_mcp <bare:yes|no> <label> <tool> [json-args]
+  local bare="$1"; shift
+  local label="${1:-}" tool="${2:-}" args="${3:-}"
+  [[ -n "$args" ]] || args='{}'
+  [[ -n "$label" && -n "$tool" ]] || die "usage: verify-celonis mcp <label> <tool|tools/list> ['{\"phrase\":\"...\"}']"
+  local dir; dir="$(run_dir)"
+  local call
+  if [[ "$tool" == "tools/list" ]]; then
+    call='{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+  else
+    call="$(python3 -c 'import json,sys; print(json.dumps({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":sys.argv[1],"arguments":json.loads(sys.argv[2])}}))' "$tool" "$args")"
+  fi
+  printf '%s\n%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' "$call" > "$dir/$label.stdin"
+  if [[ "$bare" == yes ]]; then
+    capture "$dir" "$label" env -u TYPESAFE_API_KEY HOME="$(mktemp -d)" sh -c "python3 celonis_mcp.py < '$dir/$label.stdin'"
+  else
+    capture "$dir" "$label" sh -c "python3 celonis_mcp.py < '$dir/$label.stdin'"
+  fi
+}
+
+cmd_cleanup() {
+  local dir; dir="$(run_dir)"
+  if [[ -f "$dir/view.pid" ]]; then
+    local pid; pid="$(cat "$dir/view.pid")"
+    if kill -0 "$pid" 2>/dev/null; then kill "$pid"; wait "$pid" 2>/dev/null || true; echo "stopped view pid $pid"; fi
+    rm -f "$dir/view.pid"
+  fi
+  for f in "$LEARNED" "$CURATED"; do
+    local saved="$dir/state/$(basename "$f")"
+    if [[ -f "$saved" ]]; then cmp -s "$saved" "$f" || { cp "$saved" "$f"; echo "restored $(basename "$f")"; }
+    elif [[ -f "$f" ]]; then rm -f "$f"; echo "removed $(basename "$f") (absent before the run)"; fi
+  done
+  echo "after-cleanup $(state_line)" >> "$dir/run.txt"
+  [[ -f "$LOCK" && "$(cat "$LOCK")" == "$(basename "$dir")" ]] && rm -f "$LOCK"
+  rm -f "$HOME_DIR/current"
+  echo "evidence kept at $dir"
+  ls "$dir"
+}
+
+case "${1:-}" in
+  start) cmd_start ;;
+  doctor) cmd_doctor ;;
+  cli) shift; cmd_cli "$@" ;;
+  view-start) cmd_view_start ;;
+  view-get) shift; cmd_view_get "$@" ;;
+  mcp) shift; cmd_mcp no "$@" ;;
+  mcp-bare) shift; cmd_mcp yes "$@" ;;
+  cleanup) cmd_cleanup ;;
+  *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
