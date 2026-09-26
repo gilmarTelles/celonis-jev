@@ -38,6 +38,7 @@ from pathlib import Path
 import requests
 
 import celonis_api
+import celonis_embed
 import jev
 from celonis_types import CONTAINER_KINDS, Resolution
 
@@ -46,6 +47,7 @@ COLUMNS = Path(__file__).with_name("celonis-columns.json")
 SHORTLIST = 10        # the first prompt: candidates are what a judgment costs
 SHORTLIST_FULL = 30   # re-asked only when the first pass refuses or is not sure
 MAX_COPIES = 10       # other instances a search candidate lists
+RRF_K = 60            # reciprocal-rank fusion constant (the usual 60)
 
 
 class T:
@@ -262,6 +264,14 @@ class Index:
                 self.df[t] = self.df.get(t, 0) + 1
         self.n = max(1, len(self.entries))
         self._boosts: dict[str, dict] = {}
+        self._semantic: "celonis_embed.Embeddings | None" = None
+
+    @property
+    def semantic(self) -> "celonis_embed.Embeddings":
+        """Entry embeddings, built (or read from cache/) on first use; `.ok` False when off."""
+        if self._semantic is None:
+            self._semantic = celonis_embed.Embeddings(self.entries, self.built)
+        return self._semantic
 
     def idf(self, t: str) -> float:
         return math.log(1 + self.n / (1 + self.df.get(t, 0)))
@@ -361,10 +371,33 @@ def entry_for(handle: str, index: Index) -> dict:
     return entry
 
 
+def ranked(phrase: str, index: Index) -> list[tuple[float, dict]]:
+    """BM25, fused with the embedding ranking when a local model is up.
+
+    Reciprocal-rank fusion: each list contributes 1/(RRF_K + rank), so an entry
+    both rankings like leads, and one only the embedding finds (a paraphrase, no
+    shared word) can still enter. The score carried is BM25's (0 when only the
+    embedding found it). With no model this is `top_scored` unchanged.
+    """
+    bm = index.top_scored(phrase, k=len(index.entries))
+    sem = index.semantic.rank(phrase)
+    if sem is None:
+        return bm
+    fused: dict[int, float] = {}
+    bm_score = {id(e): s for s, e in bm}
+    by_id = {id(e): e for _, e in sem}
+    for ranking in (bm, sem):
+        for r, (_, e) in enumerate(ranking, 1):
+            fused[id(e)] = fused.get(id(e), 0.0) + 1.0 / (RRF_K + r)
+    order = sorted(fused, key=lambda i: -fused[i])
+    return [(bm_score.get(i, 0.0), by_id[i]) for i in order]
+
+
 def search(phrase: str, index: Index, k: int = 10) -> list[dict]:
     """Candidates for a phrase, one per (kind, name), with the handle to open each.
 
-    Local and pure: no Jev, no tenant call. Entries sharing a kind and a name
+    Local: no Jev, no tenant call. The ranking is `ranked()`: BM25, fused with a
+    local embedding model when one answers (celonis_embed). Entries sharing a kind and a name
     collapse into their best-ranked representative. They are not always copies
     (a table name repeats across pools with different data, a KPI name across
     packages with different PQL), so `copies` lists the other instances with
@@ -390,7 +423,7 @@ def search(phrase: str, index: Index, k: int = 10) -> list[dict]:
         pinned = same_thing_in_container(phrase, entry, index)
         entry = pinned[0] if pinned else entry
         add(index.score(phrase, entry), entry, exact=True, why=path_for(why))
-    for score, e in index.top_scored(phrase, k=len(index.entries)):
+    for score, e in ranked(phrase, index):
         if id(e) in shown:
             continue
         group = groups.get((e["kind"], e["name"]))
