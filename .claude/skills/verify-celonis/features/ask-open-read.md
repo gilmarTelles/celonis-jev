@@ -35,7 +35,7 @@ Preconditions:
 - **Read a KPI.** With a signed-in tab, run `$V cli read-kpi -- read "show the KPI for order cycle time"`. Exit `0`, and stdout shows `PQL`, `cols`, at least one row, and a `query ...ms` line.
 - **Read a non-KPI.** Run `$V cli read-not-kpi -- read "the data jobs in the main pool"`. Exit `0`, and stdout says it resolved to a non-KPI and suggests `celonis open`.
 - **Open by id.** Take an `id` from `$V cli open-id-search -- search --json "the operations dashboard"`. Run `$V cli open-id -- open --id <that id>`. Exit `0`, stdout shows `[<kind>] <name>` and either `opened: https://...` or `no browser to open; link: https://...`. An unknown id exits `2` with `unknown id`.
-- **Read by id.** Take a `kpi` candidate's id (`<model id>/<kpi id>`) from `search --json`. Run `$V cli read-id -- read --id <that id>`. With `browser   yes`: exit `0` and rows as in `read-kpi`. With `browser   no`: exit `1`, the KPI title and its `PQL` line print, then `no CDP browser to run it in`. A non-KPI id exits `2` with `read needs a KPI` and suggests `open --id`.
+- **Read by id.** Take a `kpi` candidate's id (`<model id>/<kpi id>`) from `search --json`. Run `$V cli read-id -- read --id <that id>`. With `browser   yes`: exit `0` and rows as in `read-kpi`. With `browser   no`: exit `1`, the KPI title and its `PQL` line print, then `no CDP browser to run it in`. A non-KPI id exits `2` with `read needs a KPI` and suggests `open --id`. An unknown id exits `2` with `unknown id` and no `open --id` hint. With no tenant configured (`HOME=$(mktemp -d)`), a KPI id prints one `NoTenant: no tenant configured ...` line on stderr, no traceback, and exits `1`.
 
 ## Gotchas
 

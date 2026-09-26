@@ -587,10 +587,16 @@ def cmd_read(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
     title = ""
     if handle:
         try:
-            k, km = P.kpi_definition(R.entry_for(handle, index), index)
+            entry = R.entry_for(handle, index)
         except LookupError as e:
             print(f"  {e}")
-            print(f"  open it with: celonis open --id {handle}")
+            return 2
+        try:
+            k, km = P.kpi_definition(entry, index)
+        except LookupError as e:
+            print(f"  {e}")
+            if entry["kind"] != "kpi":
+                print(f"  open it with: celonis open --id {handle}")
             return 2
         pql = pql or k["pql"]
         title = f'{handle} -> KPI {k.get("displayName") or k.get("id")}'
@@ -677,6 +683,9 @@ def main() -> int:
         return run(cmd, phrase, index, opts, flags, pql)
     except jev.JevError as e:
         print(e, file=sys.stderr)
+        return 1
+    except (celonis_api.NoTenant, requests.RequestException) as e:
+        print(f"{type(e).__name__}: {e}", file=sys.stderr)
         return 1
 
 
