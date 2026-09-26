@@ -523,10 +523,12 @@ def ranked(phrase: str, index: Index) -> list[tuple[float, dict]]:
     both rankings like leads, and one only the embedding finds (a paraphrase, no
     shared word) can still enter. As in `top_scored`, a container the ask named
     leads the fused order. The score carried is BM25's (0 when only the
-    embedding found it). With no model this is `top_scored` unchanged.
+    embedding found it). With no model, or an ask with no content words
+    ("the", "show me the"), this is `top_scored` unchanged: an embedding of
+    stopwords is noise, not a paraphrase.
     """
     bm = index.top_scored(phrase, k=len(index.entries))
-    sem = index.semantic.rank(phrase)
+    sem = index.semantic.rank(phrase) if stems(phrase) else None
     if sem is None:
         return bm
     fused: dict[int, float] = {}

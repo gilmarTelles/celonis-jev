@@ -410,7 +410,7 @@ def cmd_columns(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
         print("  which pool? --pool takes a name, an id, or a vocabulary phrase")
         print("  a phrase scans only the tables it names")
         return 1
-    limit = int(opts["--limit"]) if isinstance(opts.get("--limit"), str) else None
+    limit = cliargs.number(opts, "--limit", None)
 
     def report(i: int, n: int, name: str, info: dict) -> None:
         state = (f"{len(info['columns'])} cols" if "columns" in info
@@ -491,9 +491,14 @@ def search_report(phrase: str, index: R.Index, k: int, next_step: str) -> dict:
         c["url"], warnings = celonis_api.absolute_or_relative(c["url"])
     if index.semantic.warning:
         warnings = warnings + [index.semantic.warning]
-    return {"candidates": candidates, "index_built": index.built,
-            "next": next_step,
-            "warnings": warnings}
+    report = {"candidates": candidates, "index_built": index.built,
+              "next": next_step,
+              "warnings": warnings}
+    if not candidates:
+        report["reason"] = (f"nothing in the index shares a word with {phrase!r}" if R.stems(phrase)
+                            else f"{phrase!r} has no words to search for "
+                                 f"(stopwords such as 'the' and 'show me' are ignored)")
+    return report
 
 
 def navigate(url: str) -> bool:
@@ -510,7 +515,7 @@ def navigate(url: str) -> bool:
 
 def cmd_search(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
                pql: str | None) -> int:
-    report = search_report(phrase, index, int(cliargs.flag(opts, "--limit") or 10), CLI_NEXT)
+    report = search_report(phrase, index, cliargs.number(opts, "--limit", 10), CLI_NEXT)
     if "--json" in flags:
         print(json.dumps(report, indent=1))
         return 0 if report["candidates"] else 2
@@ -527,7 +532,7 @@ def cmd_search(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
                   f"{f' (+{more} more)' if more else ''}")
         print(f"          {c['url']}")
     if not report["candidates"]:
-        print(f"  nothing in the index shares a word with {phrase!r}")
+        print(f"  {report['reason']}")
     return 0 if report["candidates"] else 2
 
 
@@ -676,8 +681,7 @@ def main() -> int:
         return 0 if not any(l.startswith("FAIL") for l in doctor()) else 1
     if cmd == "view":
         import celonis_view
-        port = opts.get("--port")
-        celonis_view.serve(int(port) if isinstance(port, str) else celonis_view.DEFAULT_PORT,
+        celonis_view.serve(cliargs.number(opts, "--port", celonis_view.DEFAULT_PORT),
                            open_browser="--no-open" not in flags)
         return 0
     if cmd == "index":

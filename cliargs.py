@@ -7,6 +7,9 @@ this, so adding a flag does not add a parsing idiom.
 
 from __future__ import annotations
 
+import sys
+from typing import NoReturn
+
 VALUE_FLAGS = ("--pool", "--job", "--task", "--limit", "--promote", "--why", "--port", "--label", "--id")
 
 
@@ -32,6 +35,26 @@ def parse_argv(argv: list[str]) -> tuple[list[str], dict]:
 
 
 def flag(opts: dict, name: str) -> str | None:
-    """A value flag's content, or None. `True` (a bare `--name`) reads as None."""
+    """A value flag's content, or None when absent. Given with no value, a usage error."""
     v = opts.get(name)
-    return v if isinstance(v, str) and v else None
+    if v is None:
+        return None
+    if not isinstance(v, str) or not v:
+        usage_error(f"{name} needs a value")
+    return v
+
+
+def usage_error(message: str) -> NoReturn:
+    """A bad command line: one line on stderr and exit 2, never a traceback."""
+    print(message, file=sys.stderr)
+    raise SystemExit(2)
+
+
+def number(opts: dict, name: str, default: int | None) -> int | None:
+    """A value flag that must be a positive whole number, or `default` when absent."""
+    v = flag(opts, name)
+    if v is None:
+        return default
+    if not v.isdigit() or int(v) < 1:
+        usage_error(f"{name} must be a positive whole number, got {v!r}")
+    return int(v)

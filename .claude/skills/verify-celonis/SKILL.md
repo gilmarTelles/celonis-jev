@@ -1,6 +1,6 @@
 ---
 name: verify-celonis
-description: Drive the celonis-jev resolver the way a user does (the stdio MCP server agents call, the `celonis_cli.py` CLI, and the loopback trace page `celonis view`) and capture proof outside the checkout. Use after changing resolution, CLI output, the workbench guard, the view page, or the MCP tools, or whenever a claim like "resolve now picks X" or "the guard refuses Y" needs evidence against the real tenant.
+description: Drive the celonis-jev resolver the way a user does (the stdio MCP server agents call, the `celonis_cli.py` CLI, and the loopback trace page `celonis view`) and capture proof outside the checkout. Use after changing resolution, search ranking or embeddings, CLI output, the workbench guard, the view page, or the MCP tools, or whenever a claim like "resolve now picks X" or "the guard refuses Y" needs evidence against the real tenant.
 ---
 
 # Verify celonis-jev
@@ -50,8 +50,11 @@ The trace page runs only when a feature needs it: `$V view-start` picks a free p
 - **CLI:** `$V cli <label> -- <celonis_cli args...>`, for example `$V cli resolve-kpi -- resolve --json "show the KPI for order cycle time"`. Prefer `--json` wherever the command offers it and assert on fields. Exit codes are part of the contract: `resolve`/`ask` return `0` on a hit, `2` on no match, and `3` on an ambiguous `ask` (which lists candidates and opens nothing); `query`/`table` return `1` on a refusal or error.
 - **Trace page API:** `$V view-get <label> '/api/resolve?q=<url-encoded phrase>'`. Also `/api/status`. `/api/open` navigates Chrome **and** learns the phrase, so use it only for the open feature.
 - **Trace page UI (optional, for a visual proof):** open the `view.url` from the run dir in a browser the harness can drive, type into `#q`, submit with `#go` ("Resolve"), and wait until `#go` reads `Resolve` again. The verdict renders in `#out` and the status pills in `#pills`.
-- **MCP:** `$V mcp <label> tools/list` or `$V mcp <label> celonis_resolve '{"phrase":"..."}'`. This sends `initialize` plus one call and captures both JSON-RPC replies.
+- **MCP:** `$V mcp <label> tools/list` or `$V mcp <label> celonis_resolve '{"phrase":"..."}'`. This sends `initialize` plus one call and captures both JSON-RPC replies. Append more `<tool> '<json>'` pairs to send several calls to one server process, which is the only way to prove per-process state such as the embedding breaker.
 - **MCP with no credentials:** `$V mcp-bare <label> <tool> '<json args>'` is the same call with `TYPESAFE_API_KEY` unset and `HOME` pointed at an empty temp dir, so neither the Jev key nor `~/.celonis/environments.json` is reachable. Use it to prove what works with no key.
+- **Any other command:** `$V run <label> -- <command...>` captures it from the repo root the same way, for example `celonis_index.py --embed` under a time limit.
+- **Assertions:** `$V check <label> '<python expression>'` evaluates the expression against the captured result and prints `PASS` or `FAIL`. `r` is the CLI's stdout JSON or the last MCP tool result's text, parsed. `rs` is every MCP tool result, parsed. `replies` is the raw JSON-RPC replies (for `isError`).
+- **Semantic search:** set `CELONIS_EMBED_URL` (`off`, or another server) or `CELONIS_EMBED_MODEL` in front of `$V cli`, `$V run`, or `$V mcp`. `$V fake-ollama hang|500` starts a broken embedding server on a free port and prints its URL (see `features/embed-down.md`).
 
 Stable handles: CLI subcommands and flags from the docstring at the top of `celonis_cli.py`; the JSON keys of `Resolution` in `celonis_types.py` (`path`, `name`, `kind`, `url`, `confidence`, `confirm`, `alternatives`, `reason`, `calls`); the view routes in `celonis_view.py`; the tool names in `celonis_mcp.py`.
 
@@ -59,7 +62,7 @@ Tenant content (names, counts, which phrase maps where) changes whenever the ten
 
 ## Evidence
 
-The evidence dir is `~/.cache/verify-celonis/runs/<run-id>/` (override the root with `VERIFY_CELONIS_HOME`). It stays **outside the repo** on purpose: the output holds tenant names, IDs, and URLs, which must never reach Git. Each helper call writes `<label>.cmd`, `.stdout`, `.stderr`, `.exit`, and `.state`. `.state` records hashes of the vocabulary files before and after the call and ends in `vocabulary unchanged` or `VOCABULARY CHANGED`. `run.txt` records the git revision, the dirty-file count, and the state before and after cleanup.
+The evidence dir is `~/.cache/verify-celonis/runs/<run-id>/` (override the root with `VERIFY_CELONIS_HOME`). It stays **outside the repo** on purpose: the output holds tenant names, IDs, and URLs, which must never reach Git. Each helper call writes `<label>.cmd` (led by any `CELONIS_EMBED_*` setting as a `# env` line), `.stdout`, `.stderr`, `.exit`, `.time` (wall seconds), and `.state`. `.state` records hashes of the vocabulary files before and after the call and ends in `vocabulary unchanged` or `VOCABULARY CHANGED`. `run.txt` records the git revision, the dirty-file count, and the state before and after cleanup.
 
 Proof standards:
 
@@ -76,7 +79,7 @@ Proof standards:
 $V cleanup
 ```
 
-This stops only the view process this run started (by the PID in `view.pid`), restores `celonis-aliases.json` and `cache/aliases-learned.json` to their state at `start` (or removes them if they did not exist then), releases the lock, and lists the evidence it kept. It never touches the index or the Jev cache, never kills by process name, and never deletes the evidence dir. Run it after every attempt, including failed ones.
+This stops only the view and fake embedding server this run started (by the PIDs in `view.pid` and `fake-ollama.pid`), restores `celonis-aliases.json` and `cache/aliases-learned.json` to their state at `start` (or removes them if they did not exist then), releases the lock, and lists the evidence it kept. It never touches the index or the Jev cache, never kills by process name, and never deletes the evidence dir. Run it after every attempt, including failed ones.
 
 ## Feature map
 

@@ -4,10 +4,14 @@
 #   verify-celonis start                          new run: lock, evidence dir, state snapshot
 #   verify-celonis doctor                         is this checkout worth driving?
 #   verify-celonis cli <label> -- <cli args...>   python3 celonis_cli.py <args>, captured
+#   verify-celonis run <label> -- <command...>    any command from the repo root, captured
 #   verify-celonis view-start                     loopback trace page on a free port
 #   verify-celonis view-get <label> <path?query>  GET against the running page, captured
-#   verify-celonis mcp <label> <tool> [json-args] one MCP tools/call over stdio, captured
+#   verify-celonis mcp <label> <tool> [json-args] [<tool> <json-args>...]
+#                                                 MCP tools/calls in one server process, captured
 #   verify-celonis mcp-bare <label> <tool> [json]  the same with no Jev key and an empty HOME
+#   verify-celonis check <label> '<python expr>'   assert on a captured JSON result (r, rs)
+#   verify-celonis fake-ollama <hang|500>          a broken embedding server (replaces one); prints its URL
 #   verify-celonis cleanup                        stop what this run started, restore state
 #
 # Evidence: $VERIFY_CELONIS_HOME/runs/<run-id>/  (default ~/.cache/verify-celonis).
@@ -28,6 +32,8 @@ run_dir() {
   [[ -n "$id" && -d "$HOME_DIR/runs/$id" ]] || die "no active run; run: verify-celonis start"
   echo "$HOME_DIR/runs/$id"
 }
+
+now() { python3 -c 'import time; print(time.time())'; }
 
 hash_of() { [[ -f "$1" ]] && shasum -a 256 "$1" | cut -c1-16 || echo "absent"; }
 
@@ -69,14 +75,16 @@ capture() {  # capture <dir> <label> <command...>
   local dir="$1" label="$2"; shift 2
   local before after code=0
   before="$(state_line)"
-  printf '%q ' "$@" > "$dir/$label.cmd"; echo >> "$dir/$label.cmd"
+  { env | grep '^CELONIS_EMBED_' | sed 's/^/# env /' || true; printf '%q ' "$@"; echo; } > "$dir/$label.cmd"
+  local t0; t0="$(now)"
   (cd "$REPO" && "$@") > "$dir/$label.stdout" 2> "$dir/$label.stderr" || code=$?
+  python3 -c 'import sys; print(f"{float(sys.argv[2]) - float(sys.argv[1]):.1f} s")' "$t0" "$(now)" > "$dir/$label.time"
   after="$(state_line)"
   echo "$code" > "$dir/$label.exit"
   { echo "before $before"; echo "after  $after"; [[ "$before" == "$after" ]] && echo "vocabulary unchanged" || echo "VOCABULARY CHANGED"; } > "$dir/$label.state"
   cat "$dir/$label.stdout"
   [[ -s "$dir/$label.stderr" ]] && { echo "-- stderr"; cat "$dir/$label.stderr"; }
-  echo "-- exit $code  ($(tail -1 "$dir/$label.state"))  evidence $dir/$label.*"
+  echo "-- exit $code  $(cat "$dir/$label.time")  ($(tail -1 "$dir/$label.state"))  evidence $dir/$label.*"
   return 0
 }
 
@@ -85,6 +93,13 @@ cmd_cli() {
   [[ -n "$label" && "${1:-}" == "--" ]] || die "usage: verify-celonis cli <label> -- <celonis_cli args...>"
   shift
   capture "$(run_dir)" "$label" python3 celonis_cli.py "$@"
+}
+
+cmd_run() {
+  local label="${1:-}"; shift || true
+  [[ -n "$label" && "${1:-}" == "--" && -n "${2:-}" ]] || die "usage: verify-celonis run <label> -- <command...>"
+  shift
+  capture "$(run_dir)" "$label" "$@"
 }
 
 cmd_view_start() {
@@ -116,19 +131,22 @@ cmd_view_get() {
   capture "$dir" "$label" curl -sS -w '\nhttp %{http_code}\n' "$(cat "$dir/view.url")$path"
 }
 
-cmd_mcp() {  # cmd_mcp <bare:yes|no> <label> <tool> [json-args]
+cmd_mcp() {  # cmd_mcp <bare:yes|no> <label> <tool> [json-args] [<tool> <json-args>...]
   local bare="$1"; shift
-  local label="${1:-}" tool="${2:-}" args="${3:-}"
-  [[ -n "$args" ]] || args='{}'
-  [[ -n "$label" && -n "$tool" ]] || die "usage: verify-celonis mcp <label> <tool|tools/list> ['{\"phrase\":\"...\"}']"
+  local label="${1:-}"
+  [[ -n "$label" && -n "${2:-}" ]] || die "usage: verify-celonis mcp <label> <tool|tools/list> ['{\"phrase\":\"...\"}'] [<tool> '<json>'...]"
+  shift
   local dir; dir="$(run_dir)"
-  local call
-  if [[ "$tool" == "tools/list" ]]; then
-    call='{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
-  else
-    call="$(python3 -c 'import json,sys; print(json.dumps({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":sys.argv[1],"arguments":json.loads(sys.argv[2])}}))' "$tool" "$args")"
-  fi
-  printf '%s\n%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' "$call" > "$dir/$label.stdin"
+  python3 -c 'import json,sys
+print(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}))
+pairs = sys.argv[1:]
+for n, i in enumerate(range(0, len(pairs), 2), 2):
+    tool, args = pairs[i], (pairs[i + 1] if i + 1 < len(pairs) else "") or "{}"
+    if tool == "tools/list":
+        print(json.dumps({"jsonrpc": "2.0", "id": n, "method": "tools/list"}))
+    else:
+        print(json.dumps({"jsonrpc": "2.0", "id": n, "method": "tools/call",
+                          "params": {"name": tool, "arguments": json.loads(args)}}))' "$@" > "$dir/$label.stdin"
   if [[ "$bare" == yes ]]; then
     capture "$dir" "$label" env -u TYPESAFE_API_KEY HOME="$(mktemp -d)" sh -c "python3 celonis_mcp.py < '$dir/$label.stdin'"
   else
@@ -136,13 +154,61 @@ cmd_mcp() {  # cmd_mcp <bare:yes|no> <label> <tool> [json-args]
   fi
 }
 
+cmd_check() {  # r: the CLI's JSON, or the last MCP tool text; rs: every tool text; replies: raw JSON-RPC
+  local label="${1:-}" expr="${2:-}"
+  [[ -n "$label" && -n "$expr" ]] || die "usage: verify-celonis check <label> '<python expression over r, rs>'"
+  local dir; dir="$(run_dir)"
+  [[ -f "$dir/$label.stdout" ]] || die "no captured $label in this run"
+  python3 - "$dir/$label.stdout" "$expr" <<'EOF' | tee -a "$dir/$label.check"
+import json, sys
+text = open(sys.argv[1]).read()
+replies = [json.loads(line) for line in text.splitlines() if line.startswith('{"jsonrpc"')]
+try:
+    rs = [json.loads(x["result"]["content"][0]["text"]) for x in replies if "content" in x.get("result", {})]
+    r = rs[-1] if replies else json.loads(text)
+except (ValueError, KeyError, IndexError, TypeError):
+    rs, r = [], None
+try:
+    ok = bool(eval(sys.argv[2], {"r": r, "rs": rs, "replies": replies}))
+except Exception as err:
+    ok = False
+    print(f"  ({type(err).__name__}: {err})")
+print(f"{'PASS' if ok else 'FAIL'}  {sys.argv[2]}")
+EOF
+}
+
+cmd_fake_ollama() {
+  local mode="${1:-}"
+  [[ "$mode" == hang || "$mode" == 500 ]] || die "usage: verify-celonis fake-ollama <hang|500>"
+  local dir; dir="$(run_dir)"
+  if [[ -f "$dir/fake-ollama.pid" ]] && kill -0 "$(cat "$dir/fake-ollama.pid")" 2>/dev/null; then
+    kill "$(cat "$dir/fake-ollama.pid")"; echo "replaced fake-ollama $(cat "$dir/fake-ollama.url")" >&2
+  fi
+  local port; port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+  python3 -c 'import subprocess,sys
+log = open(sys.argv[2], "a")
+p = subprocess.Popen([sys.executable, sys.argv[1], sys.argv[3], sys.argv[4]], stdin=subprocess.DEVNULL,
+                     stdout=log, stderr=log, start_new_session=True)
+print(p.pid)' "$(dirname "${BASH_SOURCE[0]}")/fake-ollama.py" "$dir/fake-ollama.log" "$port" "$mode" > "$dir/fake-ollama.pid"
+  for _ in $(seq 1 20); do
+    if curl -fsS "http://127.0.0.1:$port/api/version" -o /dev/null 2>/dev/null; then
+      : > "$dir/fake-ollama.log"
+      echo "http://127.0.0.1:$port" | tee "$dir/fake-ollama.url"; return 0
+    fi
+    sleep 0.25
+  done
+  die "fake-ollama did not answer; see $dir/fake-ollama.log"
+}
+
 cmd_cleanup() {
   local dir; dir="$(run_dir)"
-  if [[ -f "$dir/view.pid" ]]; then
-    local pid; pid="$(cat "$dir/view.pid")"
-    if kill -0 "$pid" 2>/dev/null; then kill "$pid"; wait "$pid" 2>/dev/null || true; echo "stopped view pid $pid"; fi
-    rm -f "$dir/view.pid"
-  fi
+  local svc
+  for svc in view fake-ollama; do
+    [[ -f "$dir/$svc.pid" ]] || continue
+    local pid; pid="$(cat "$dir/$svc.pid")"
+    if kill -0 "$pid" 2>/dev/null; then kill "$pid"; wait "$pid" 2>/dev/null || true; echo "stopped $svc pid $pid"; fi
+    rm -f "$dir/$svc.pid"
+  done
   for f in "$LEARNED" "$CURATED"; do
     local saved="$dir/state/$(basename "$f")"
     if [[ -f "$saved" ]]; then cmp -s "$saved" "$f" || { cp "$saved" "$f"; echo "restored $(basename "$f")"; }
@@ -159,10 +225,13 @@ case "${1:-}" in
   start) cmd_start ;;
   doctor) cmd_doctor ;;
   cli) shift; cmd_cli "$@" ;;
+  run) shift; cmd_run "$@" ;;
   view-start) cmd_view_start ;;
   view-get) shift; cmd_view_get "$@" ;;
   mcp) shift; cmd_mcp no "$@" ;;
   mcp-bare) shift; cmd_mcp yes "$@" ;;
+  check) shift; cmd_check "$@" ;;
+  fake-ollama) shift; cmd_fake_ollama "$@" ;;
   cleanup) cmd_cleanup ;;
-  *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
