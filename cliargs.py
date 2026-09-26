@@ -35,9 +35,13 @@ def parse_argv(argv: list[str]) -> tuple[list[str], dict]:
 
 
 def flag(opts: dict, name: str) -> str | None:
-    """A value flag's content, or None. `True` (a bare `--name`) reads as None."""
+    """A value flag's content, or None when absent. Given with no value, a usage error."""
     v = opts.get(name)
-    return v if isinstance(v, str) and v else None
+    if v is None:
+        return None
+    if not isinstance(v, str) or not v:
+        usage_error(f"{name} needs a value")
+    return v
 
 
 def usage_error(message: str) -> NoReturn:
