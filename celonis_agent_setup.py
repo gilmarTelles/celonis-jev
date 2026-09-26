@@ -13,7 +13,8 @@ What it does:
   3. runs `celonis_cli.py doctor` and prints what still needs a human
 
 MCP is the one agent interface. Install and `--uninstall` both remove the omp
-extension symlink older versions installed.
+extension symlink older versions installed, when it is dangling or points into
+this repo; `--check` reports it.
 """
 
 from __future__ import annotations
@@ -63,6 +64,14 @@ def patch_mcp(path: Path, check: bool, uninstall: bool) -> str:
     return f"{'keep' if present else 'add'}   {path}"
 
 
+def stale_extension(link: Path = OLD_OMP_EXT) -> bool:
+    """Is `link` the extension an older install made: a symlink whose target is
+    gone or lies in this repo? Anything else there is someone else's file."""
+    if not link.is_symlink():
+        return False
+    return not link.exists() or link.resolve().is_relative_to(HOME)
+
+
 def doctor() -> int:
     print("\ncelonis_cli.py doctor")
     proc = subprocess.run([sys.executable, str(HOME / "celonis_cli.py"), "doctor"], text=True)
@@ -73,9 +82,12 @@ def main() -> int:
     check = "--check" in sys.argv
     uninstall = "--uninstall" in sys.argv
     print(f"celonis-jev at {HOME}\n")
-    if not check and OLD_OMP_EXT.is_symlink():   # it points at a file this repo deleted
-        OLD_OMP_EXT.unlink()
-        print(f"  remove {OLD_OMP_EXT} (extension from an older install)")
+    if stale_extension():
+        if check:
+            print(f"  stale  {OLD_OMP_EXT} (extension from an older install; would remove)")
+        else:
+            OLD_OMP_EXT.unlink()
+            print(f"  remove {OLD_OMP_EXT} (extension from an older install)")
     for line in (patch_mcp(OMP_MCP, check, uninstall),
                  patch_mcp(PROJECT_MCP, check, uninstall),
                  patch_mcp(CLAUDE_MCP, check, uninstall)):
