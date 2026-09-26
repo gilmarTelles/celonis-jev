@@ -3,6 +3,10 @@
 `python3 celonis_index.py --describe` asks the claude CLI for one sentence per
 item from the item's own metadata; celonis_embed embeds that sentence with the
 item, so an item named by a code or a terse label can match a paraphrase.
+
+This module owns cache/descriptions.json: {"model", "cost_usd" (all runs),
+"seconds", "items": {"<kind><TAB><name>": {"description", "h"}}}, where `h`
+hashes the metadata sent. It survives index refreshes.
 """
 
 from __future__ import annotations
@@ -21,8 +25,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 CACHE = Path(__file__).with_name("cache")
-
-
 PATH = CACHE / "descriptions.json"
 
 

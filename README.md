@@ -107,11 +107,24 @@ step when Ollama answers and skips it silently otherwise. Search ranks the
 entries that have a vector and leaves the rest to BM25; semantic ranking adds
 about 0.15 s a search.
 
-`python3 celonis_index.py --describe` (optional; claude CLI with haiku, about
-$2.6 per index) writes a one-line description of each item, from its own
-metadata, to `cache/descriptions-<index stamp>.json`; the next `--embed` then
-embeds kind, name and description instead of the name alone, so an item named by
-a code or a terse label can match a paraphrase. With no file, entries embed as before.
+`python3 celonis_index.py --describe [--budget 3]` (optional) asks Claude haiku
+for a one-sentence description of each item, so an item named by a code or a
+terse label can match a paraphrase; the embed step that follows embeds kind,
+name and description instead of the name alone. With no descriptions, entries
+embed as before.
+
+- What leaves the machine: for each item, its kind, its name, up to 3 container
+  names (package, pool, space, app), up to 30 column or field names, and up to
+  200 characters each of its PQL, key and hint. This goes to Anthropic through
+  the `claude` CLI and your Claude login, with no tools, settings, MCP servers or
+  slash commands loaded. Nothing else from the tenant is sent.
+- Cost: `--budget` caps what one run spends (default $3; the run stops with
+  "stopped: budget reached" and a rerun continues). The first full run over
+  about 2,500 items cost $2.61 with an earlier prompt that also asked for
+  keywords; the current prompt asks for less output. The file records the total.
+- The result lives in `cache/descriptions.json`, keyed by kind and name, and
+  survives index refreshes. A rerun describes only items that are new or whose
+  metadata changed.
 
 Without Ollama, or with no embeddings yet, search is BM25 only and the search
 report's `warnings` says so. A query embed that fails or takes over 5 s pauses
