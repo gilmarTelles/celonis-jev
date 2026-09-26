@@ -824,14 +824,14 @@ def resolve(phrase: str, client: jev.Jev | None = None, index: Index | None = No
                          "kind": n.get("assetType", n.get("type", "")),
                          "url": n.get("url") or n.get("link")} for n in named[:8]],
                error=warnings[0] if warnings else None)
-    if len(named) == 1 and named[0].get("name"):
-        out = Resolution(phrase=phrase, path="named_lookup", name=named[0]["name"],
-                         kind=named[0].get("assetType", named[0].get("type", "")),
-                         url=None, confidence=1.0, grounded=True,
-                         ms=(time.perf_counter() - started) * 1000)
+    # The search hit carries no url or kind; only its index entry can be opened.
+    entry = index.by_id.get(named[0].get("identifier") or "") if len(named) == 1 else None
+    if entry:
+        out = answer_from_entry(phrase, entry, "named_lookup", started, index, why="named lookup")
         trace.result(out)
         if verbose:
-            print(f'"{phrase}"\n  -> named lookup: {out.name} (no model call){named}')
+            print(f'"{phrase}"\n  -> named lookup: [{out.kind}] {out.name} (no model call)\n'
+                  f'     {out.url}')
         return out
 
     scored = index.top_scored(phrase)
@@ -966,19 +966,16 @@ def resolve_code_only(phrase: str, index: "Index") -> Resolution:
         entry, why = quick
         return answer_from_entry(phrase, entry, path_for(why), started, index, why)
     named, warnings = tenant_names(phrase)
-    if named:
-        n = named[0]
-        return Resolution(phrase=phrase, path="named_lookup", name=n.get("name"),
-                          kind=n.get("assetType", n.get("type", "")),
-                          url=n.get("url") or n.get("link") or "", intent="open",
-                          confidence=1.0,
-                          ms=(time.perf_counter() - started) * 1000)
+    entry = next(filter(None, (index.by_id.get(n.get("identifier") or "") for n in named)), None)
+    if entry:
+        return answer_from_entry(phrase, entry, "named_lookup", started, index, why="named lookup")
     short = index.top(phrase, k=1)
     e = short[0] if short else None
-    return Resolution(phrase=phrase, path="bm25_top1",
-                      name=e["name"] if e else None, kind=e["kind"] if e else None,
-                      url=e["url"] if e else "", confidence=0.0, warnings=warnings,
-                      ms=(time.perf_counter() - started) * 1000)
+    out = Resolution(phrase=phrase, path="bm25_top1", url="", confidence=0.0, warnings=warnings)
+    if e:
+        _place(out, e)
+    out.ms = (time.perf_counter() - started) * 1000
+    return out
 
 
 DEMO = [

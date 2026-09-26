@@ -42,16 +42,6 @@ BASELINE = BENCH / "eval-baseline.json"
 BUCKETS = ("exact", "overlap", "paraphrase")
 DETERMINISTIC = ("alias", "literal", "column")
 
-# The tenant name search answers with its own kind strings, not index kinds. These
-# are the only ones accepted as an index kind. 'ASSET' is the search's generic type
-# for any studio asset, so it stands for every kind the index marks `asset: True`.
-STUDIO_ASSET_KINDS = frozenset({"board_v2", "scenario", "task_type_v2", "semantic_model",
-                                "insight-explorer", "analysis", "skill", "mcp-widget",
-                                "pam-widget", "ai-annotations-agent-widget"})
-KIND_ALIASES = {"ASSET": STUDIO_ASSET_KINDS, "BOARD_V2": {"board_v2"}, "VIEW": {"board_v2"},
-                "SEMANTIC_MODEL": {"semantic_model"}, "KNOWLEDGE_MODEL": {"semantic_model"},
-                "SCENARIO": {"scenario"}, "SKILL": {"skill"}, "TASK_TYPE_V2": {"task_type_v2"},
-                "PACKAGE": {"package"}, "SPACE": {"space"}}
 
 
 class ReplayMiss(RuntimeError):
@@ -156,13 +146,8 @@ def correct(res: R.Resolution | None, case: dict) -> bool:
         return False
     if not case["expect"]:
         return res.name is None
-    if res.entity_id:
-        return res.entity_id in case["expect_ids"]
-    if not res.name:
-        return False
-    kinds = KIND_ALIASES.get(res.kind or "", {res.kind})
-    return any(_pair(k, res.name) == _pair(p["kind"], p["name"])
-               for p in case["expect"] for k in kinds)
+    # A named answer with no entity id cannot be opened, so it scores wrong.
+    return bool(res.entity_id) and res.entity_id in case["expect_ids"]
 
 
 def pick(res: R.Resolution | None) -> dict:
@@ -198,7 +183,8 @@ def run_case(case: dict, index: R.Index, client) -> dict:
             "calls": hit.calls if hit else 0, "tokens": hit.tokens if hit else 0,
             "deterministic": bool(hit and hit.path in DETERMINISTIC),
             "jev_net_s": round(sum(p.get("latency_s", 0.0) for p in passes), 3),
-            "jev_cached": any(p.get("cached") for p in passes)}
+            "jev_cached": any(p.get("cached") for p in passes),
+            "warnings": sorted({w for r in (code, hit) if r for w in r.warnings})}
     return row
 
 
@@ -217,7 +203,8 @@ def summarize(rows: list[dict]) -> dict:
                   "recall30": sum(bool(r["recall30"]) for r in present),
                   "median_code_ms": med("code_ms"), "median_jev_ms": med("jev_ms"),
                   "calls": sum(r["calls"] for r in rs), "tokens": sum(r["tokens"] for r in rs),
-                  "errors": sum(1 for r in rs if r.get("error"))}
+                  "errors": sum(1 for r in rs if r.get("error")),
+                  "degraded": sum(1 for r in rs if r.get("warnings"))}
     return out
 
 
@@ -321,9 +308,15 @@ def main() -> None:
     print_table(summary, name)
     if summary["ALL"]["errors"]:
         print(f"\n! {summary['ALL']['errors']} case(s) errored and are scored wrong; see ERROR above")
+    if summary["ALL"]["degraded"]:
+        print(f"\n! {summary['ALL']['degraded']} case(s) ran degraded (tenant name search "
+              f"unavailable); offline replay cannot reproduce them")
     print_disagreements(rows)
     if BASELINE.exists():
         print_delta(summary, json.loads(BASELINE.read_text()))
+    if args.baseline and summary["ALL"]["degraded"]:
+        print("\nnot saved as the baseline: a degraded run is not the path offline replays")
+        args.baseline = False
     if args.baseline:
         shutil.copyfile(out, BASELINE)
     print(f"\nwrote {out.relative_to(HERE)}" + (f" and {BASELINE.relative_to(HERE)}" if args.baseline else ""))
