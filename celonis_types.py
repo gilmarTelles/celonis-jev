@@ -121,6 +121,7 @@ class Resolution:
     cached: bool = False
     ms: float = 0.0
     kpi: dict | None = None        # the definition, when the path ran one
+    warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
