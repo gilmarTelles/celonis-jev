@@ -1,7 +1,7 @@
 """Natural language -> a Celonis location (and only when needed, an action).
 
     resolve("the view that shows tax credits by month")
-      -> {kind: board_v2, name: 'IBS/CBS Creditability Map', url: ..., confidence, alternatives}
+      -> {kind: board_v2, name: 'Tax Credit Monthly Overview', url: ..., confidence, alternatives}
 
 Pipeline, cheapest first:
 
@@ -533,7 +533,7 @@ def decide(phrase: str, index: "Index") -> tuple[dict, str] | None:
     * a word the column snapshot knows as a column, when the ask names a table and
       that column picks exactly one of them ('the table with the KTOSL field');
     * an entry whose name the ask spells out in full, when it is the only name the
-      ask contains ('tax jurisdiction map').
+      ask contains ('invoice aging overview').
 
     Everything else needs the judgment, and gets it.
     """
@@ -589,7 +589,7 @@ def questions(shortlist: list[dict], phrase: str = "") -> dict:
             "instructions": ("Which entry in `candidates` does the request refer to? Pick the entry "
                              "that IS the thing asked about, not one that merely relates to the same "
                              "subject or contains it. Match on meaning: 'the view that shows tax "
-                             "credits by month' may be named 'IBS/CBS Creditability Map'. Choose "
+                             "credits by month' may be named 'Tax Credit Monthly Overview'. Choose "
                              "`none` when no entry is the thing being asked about."),
             "criteria": opts,
         },
@@ -841,7 +841,7 @@ def decide_match(phrase: str, answers: dict, short: list[dict], index: "Index") 
         # fallback is for: a thin index entry that little else in the list resembles.
         # It used to promote whatever came first, whatever its score, and dress it up
         # as `confirm: True`, which is how an ask for an alert that does not exist
-        # answered "Alert Control Manager" (the model had given it 0.05).
+        # answered with an unrelated alert board (the model had given it 0.05).
         #
         # Measured 17 Sep over the labelled set: the candidate a real ask needs never
         # scored below 0.26, and the best candidate of an ask with no target never
