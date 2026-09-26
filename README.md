@@ -65,7 +65,7 @@ The core modules are:
 | `workbench.py` | guarded read-only SQL against a configured pool |
 | `celonis_view.py` / `celonis_view.html` | loopback-only decision trace |
 | `agent.py`, `page.py`, `dom.py`, `browser_nav.py` | generic browser navigation support |
-| `celonis_mcp.py` / `omp/celonis.ts` | MCP and omp host adapters |
+| `celonis_mcp.py` | the MCP server: the one agent interface |
 
 ## Host integrations
 

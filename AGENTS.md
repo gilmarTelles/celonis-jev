@@ -67,8 +67,7 @@ workbench is the only path that sends SQL and its guard allows one `SELECT` or
 
 ## Host integrations
 
-`omp/celonis.ts` exposes the CLI as omp tools. `celonis_mcp.py` exposes the same
-read-only surface over MCP. `python3 celonis_agent_setup.py --check` audits
+`celonis_mcp.py` exposes the read-only surface over MCP. `python3 celonis_agent_setup.py --check` audits
 local wiring; the installer writes machine-specific configuration to ignored
 locations.
 
