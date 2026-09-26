@@ -390,9 +390,9 @@ class Index:
 
     @property
     def semantic(self) -> "celonis_embed.Embeddings":
-        """Entry embeddings, built (or read from cache/) on first use; `.ok` False when off."""
+        """Semantic ranking over the cached entry vectors; never embeds the index itself."""
         if self._semantic is None:
-            self._semantic = celonis_embed.Embeddings(self.entries, self.built)
+            self._semantic = celonis_embed.Embeddings(self.entries)
         return self._semantic
 
     def _expanded(self, phrase: str) -> set[str]:
