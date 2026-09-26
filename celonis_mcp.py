@@ -5,7 +5,7 @@
 Stdio transport, newline-delimited JSON-RPC, no dependencies beyond this repo
 (the resolver, the index, cdp.py). Tools:
 
-    celonis_search(phrase)       -> candidates with ids, copies collapsed (no Jev)
+    celonis_search(phrase)       -> candidates with ids, other instances as copies (no Jev)
     celonis_open(id | phrase)    -> navigate the signed-in tab; the URL either way
     celonis_read(id | phrase)    -> run a KPI's PQL, return the rows
     celonis_resolve(phrase)      -> where a phrase points, with alternatives (Jev)
@@ -38,7 +38,8 @@ TOOLS = [
     {
         "name": "celonis_search",
         "description": ("Find Celonis assets, KPIs, objects, tables and pages matching a phrase. "
-                        "Returns ranked candidates with ids, copies collapsed. Local index only: "
+                        "Returns ranked candidates with ids, one per kind and name; copies lists "
+                        "other instances, so pick the one in the right container. Local index only: "
                         "no Jev key, tenant or browser needed. Then pass an id to celonis_open "
                         "or celonis_read."),
         "inputSchema": {"type": "object", "properties": {

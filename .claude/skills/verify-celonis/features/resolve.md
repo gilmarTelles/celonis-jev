@@ -1,6 +1,6 @@
 # Resolve a phrase
 
-Resolve turns a plain-language request into one tenant location, with a kind, a tenant-relative URL, a confidence, and runner-up candidates. It asks the user to confirm when the pick is weak and refuses when nothing fits. Search is its local, judgment-free sibling: ranked candidates with ids, copies collapsed. Neither opens a browser or changes the vocabulary.
+Resolve turns a plain-language request into one tenant location, with a kind, a tenant-relative URL, a confidence, and runner-up candidates. It asks the user to confirm when the pick is weak and refuses when nothing fits. Search is its local, judgment-free sibling: ranked candidates with ids, one per kind and name, each listing its other instances as `copies`. Neither opens a browser or changes the vocabulary.
 
 ## Sub-features
 
@@ -31,7 +31,7 @@ Preconditions:
 - **Refusal.** Ask for something absent from the tenant. Run `$V cli resolve-refuse -- resolve --json "xylophone recital for penguins"`. Exit `2`, `name` is `null`, `path` is `no_candidates`, and `reason` is `no match`.
 - **Baseline.** Run the code-only path on the judged phrase. Run `$V cli resolve-baseline -- resolve --no-jev "the data jobs in the main pool"`. Exit `0`, the output is a JSON `Resolution`, and `calls` is `0`.
 - **Verbose trace.** Run `$V cli resolve-verbose -- resolve "the data jobs in the main pool"`. Exit `0`, and stdout shows the steps before the verdict.
-- **Search.** Run `$V cli resolve-search -- search --json "show the KPI for order cycle time"`. Exit `0`; stdout is one JSON object whose `candidates` each carry `id`, `kind`, `name`, `container`, `url`, `score`, and `instances`, and no two share a (`kind`, `name`) pair. When `resolve-literal` above answered deterministically, the first candidate has `exact: true`, `why: "literal"`, and the same `url` as that resolve. Run it again as `env -u TYPESAFE_API_KEY $V cli resolve-search-nokey -- search --json "show the KPI for order cycle time"` and the output is identical: search never calls Jev.
+- **Search.** Run `$V cli resolve-search -- search --json "show the KPI for order cycle time"`. Exit `0`; stdout is one JSON object whose `candidates` each carry `id`, `kind`, `name`, `container`, `url`, `score`, `instances`, and `copies` (up to ten `{id, container}` for the other instances, best first), and no two share a (`kind`, `name`) pair. The text form prints the copies' containers on an `also in:` line. When `resolve-literal` above answered deterministically, the first candidate has `exact: true`, `why: "literal"`, and the same `url` as that resolve (search prefixes the tenant base when a tenant is configured, so compare the path). Run it again as `env -u TYPESAFE_API_KEY $V cli resolve-search-nokey -- search --json "show the KPI for order cycle time"` and the output is identical: search never calls Jev.
 - **Search with no hit.** Run `$V cli resolve-search-none -- search "xylophone recital for penguins"`. Exit `2`, and stdout says nothing in the index shares a word with it.
 - **Proof.** Every `.state` file above reads `vocabulary unchanged`.
 

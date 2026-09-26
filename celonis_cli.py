@@ -1,6 +1,6 @@
 """celonis - ask in words, land on the thing.
 
-    celonis search "<phrase>"      candidates with ids, copies collapsed (no Jev)
+    celonis search "<phrase>"      candidates with ids, other instances listed (no Jev)
     celonis open --id <id>         open one candidate in Chrome, or print its link
     celonis read --id <id>         run one KPI candidate's PQL, show the rows
     celonis ask "<phrase>"         resolve and go there, or print the link
@@ -513,6 +513,10 @@ def cmd_search(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
         copies = f"  x{c['instances']}" if c["instances"] > 1 else ""
         print(f"  {c['score']:>6.2f}  [{c['kind']}] {c['name']}{copies}{tag}")
         print(f"          id {c['id']}   {c['container']}")
+        if c["copies"]:
+            more = c["instances"] - 1 - len(c["copies"])
+            print(f"          also in: {'; '.join(x['container'] for x in c['copies'])}"
+                  f"{f' (+{more} more)' if more else ''}")
         print(f"          {c['url']}")
     if not report["candidates"]:
         print(f"  nothing in the index shares a word with {phrase!r}")

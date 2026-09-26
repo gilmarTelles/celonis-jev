@@ -76,7 +76,7 @@ wires it for any host that reads it. Five tools:
 
 | tool | what it does | Jev key |
 |---|---|---|
-| `celonis_search(phrase, k?)` | candidates with ids, package copies collapsed | no |
+| `celonis_search(phrase, k?)` | candidates with ids, one per kind and name; `copies` lists the other instances by container | no |
 | `celonis_open(id \| phrase)` | navigate the signed-in tab; the URL either way | only for a phrase that needs judgment |
 | `celonis_read(id \| phrase, pql?)` | run a KPI's PQL, return the rows | only for a phrase that needs judgment |
 | `celonis_resolve(phrase)` | one location, confidence, runner-ups with ids | when the phrase is ambiguous |

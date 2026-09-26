@@ -45,6 +45,7 @@ INDEX = Path(__file__).with_name("celonis-index.json")
 COLUMNS = Path(__file__).with_name("celonis-columns.json")
 SHORTLIST = 10        # the first prompt: candidates are what a judgment costs
 SHORTLIST_FULL = 30   # re-asked only when the first pass refuses or is not sure
+MAX_COPIES = 10       # other instances a search candidate lists
 
 
 class T:
@@ -363,36 +364,42 @@ def entry_for(handle: str, index: Index) -> dict:
 def search(phrase: str, index: Index, k: int = 10) -> list[dict]:
     """Candidates for a phrase, one per (kind, name), with the handle to open each.
 
-    Local and pure: no Jev, no tenant call. Package copies of one thing collapse
-    into their best-ranked representative, and `instances` says how many there
-    are. A deterministic answer (alias, spelled-out name, named column) leads,
+    Local and pure: no Jev, no tenant call. Entries sharing a kind and a name
+    collapse into their best-ranked representative. They are not always copies
+    (a table name repeats across pools with different data, a KPI name across
+    packages with different PQL), so `copies` lists the other instances with
+    their container, best first, up to MAX_COPIES, and `instances` counts them
+    all. A deterministic answer (alias, spelled-out name, named column) leads,
     marked `exact`. The collapse lives here only: inside the Jev shortlist it
     changes which answers get flagged for confirmation.
     """
     out: list[dict] = []
     groups: dict[tuple[str, str], dict] = {}
+    shown: set[int] = set()
 
-    def add(score: float, e: dict, instances: int, **extra) -> None:
+    def add(score: float, e: dict, **extra) -> None:
         out.append({"id": ref(e), "name": e["name"], "kind": e["kind"],
                     "container": _trail_entry(e)["container"], "url": e["url"],
-                    "score": round(score, 2), "instances": instances, **extra})
+                    "score": round(score, 2), "instances": 1, "copies": [], **extra})
         groups[(e["kind"], e["name"])] = out[-1]
+        shown.add(id(e))
 
     quick = decide(phrase, index)
     if quick:
         entry, why = quick
         pinned = same_thing_in_container(phrase, entry, index)
         entry = pinned[0] if pinned else entry
-        # Counted by the walk below, which sees its copies (itself included) by score.
-        add(index.score(phrase, entry), entry, 0, exact=True, why=path_for(why))
+        add(index.score(phrase, entry), entry, exact=True, why=path_for(why))
     for score, e in index.top_scored(phrase, k=len(index.entries)):
+        if id(e) in shown:
+            continue
         group = groups.get((e["kind"], e["name"]))
         if group is not None:
             group["instances"] += 1
+            if len(group["copies"]) < MAX_COPIES:
+                group["copies"].append({"id": ref(e), "container": _trail_entry(e)["container"]})
         elif len(out) < k:
-            add(score, e, 1)
-    if quick:
-        out[0]["instances"] = max(1, out[0]["instances"])
+            add(score, e)
     return out
 
 

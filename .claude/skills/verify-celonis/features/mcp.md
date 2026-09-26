@@ -6,7 +6,7 @@
 
 - `mcp-init` answers `initialize` with `serverInfo.name` `celonis-jev` and protocol `2024-11-05`.
 - `mcp-list` lists exactly the five tools with input schemas.
-- `mcp-search-nokey` returns collapsed candidates with `id`, `name`, `kind`, `container`, `url`, `score`, and `instances`, with no key and no tenant config.
+- `mcp-search-nokey` returns one candidate per (`kind`, `name`) with `id`, `name`, `kind`, `container`, `url`, `score`, `instances`, and `copies` (the other instances as `{id, container}`), with no key and no tenant config.
 - `mcp-open-id-nokey` returns the candidate's url with `opened: false` when there is no key, no tenant config, and no Chrome.
 - `mcp-read-not-kpi` refuses a non-KPI id with `isError` and the entry's url.
 - `mcp-unknown-id` refuses an id the index does not hold with `isError` and a hint to search.
@@ -27,7 +27,7 @@ Preconditions:
 - Baseline preconditions from the README hold. The `mcp-bare` steps need only the local index: no key, no tenant config, no browser.
 
 - **List tools.** Run `$V mcp mcp-list tools/list`. There are two JSON-RPC replies: `id 1` has `serverInfo.name: "celonis-jev"`, and `id 2` lists `celonis_search`, `celonis_open`, `celonis_read`, `celonis_resolve`, and `celonis_doctor`.
-- **Search with no key.** Run `$V mcp-bare mcp-search-nokey celonis_search '{"phrase":"the operations dashboard","k":5}'`. `isError: false`. The result text has at most five `candidates`, each with a non-empty `id` and an integer `instances` of at least 1, no two sharing a (`kind`, `name`) pair, and `warnings` names the missing tenant config because the urls are tenant-relative. Stderr is empty.
+- **Search with no key.** Run `$V mcp-bare mcp-search-nokey celonis_search '{"phrase":"the operations dashboard","k":5}'`. `isError: false`. The result text has at most five `candidates`, each with a non-empty `id`, an integer `instances` of at least 1, and a `copies` list of `{id, container}` holding `min(10, instances - 1)` entries, none equal to the candidate's own `id`, no two candidates sharing a (`kind`, `name`) pair, and `warnings` names the missing tenant config because the urls are tenant-relative. Stderr is empty.
 - **Open by id with no key.** Take the first candidate's `id` from the search above. Run `$V mcp-bare mcp-open-id-nokey celonis_open '{"id":"<that id>"}'`. `isError: false`, `opened: false`, `url` equals that candidate's `url`, and `note` says to give the URL to the user. With Chrome up and a tenant configured, the plain `$V mcp` form navigates instead and reads `opened: true`.
 - **Read a non-KPI id.** Take a candidate whose `kind` is not `kpi`. Run `$V mcp-bare mcp-read-not-kpi celonis_read '{"id":"<that id>"}'`. `isError: true`, `reason` starts `read needs a KPI`, and `url` is set.
 - **Unknown id.** Run `$V mcp-bare mcp-unknown-id celonis_open '{"id":"no-such-id"}'`, then the same with `celonis_read`. Both `isError: true` with `reason` starting `unknown id 'no-such-id'` and naming `celonis_search`.
@@ -42,7 +42,7 @@ Preconditions:
 
 - The server exits when stdin closes. The helper sends `initialize` and one call per process, so there is no session state to rely on between calls. Ids are index handles, so they stay valid across processes until the index is rebuilt.
 - A KPI's id is `<model id>/<kpi id>`: package copies repeat the bare KPI id, and only the pair is unique.
-- Search collapses copies by (`kind`, `name`). A translated copy has a different name, so it stays its own candidate.
+- Search collapses entries by (`kind`, `name`). They are not always copies: a table name repeats across pools with different data, and a KPI name across packages with different PQL. `copies` names each other instance's container and id, so pick the one in the right container. A translated copy has a different name, so it stays its own candidate.
 - Tool results nest JSON as a string inside `result.content[0].text`. Parse twice.
 - Unknown JSON lines are silently skipped. A malformed request yields no reply, not an error reply.
 - A host may launch it with a different working directory than the repo root. The server finds the index next to its own file, so that is fine, but credentials still come from `~/.celonis` and the environment.
