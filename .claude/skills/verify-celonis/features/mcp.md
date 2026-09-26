@@ -10,6 +10,7 @@
 - `mcp-open-id-nokey` returns the candidate's url with `opened: false` when there is no key, no tenant config, and no Chrome.
 - `mcp-read-not-kpi` refuses a non-KPI id with `isError` and the entry's url.
 - `mcp-unknown-id` refuses an id the index does not hold with `isError` and a hint to search.
+- `mcp-bad-args` validates arguments at the tool boundary: `phrase`, `id`, `pql` are strings (stripped, empty means absent), `k` is an integer from 1 to 50 and not a boolean, search and resolve need `phrase`, open and read need exactly one of `id` or `phrase`. A bad call returns a one-line `isError`; an unexpected exception returns `<Type>: <message>` and its traceback goes to stderr only.
 - `mcp-resolve` returns `hit` (with its `id`), `confidence`, `confirm`, `alternatives` (each with an `id`), and `next`.
 - `mcp-doctor` returns the doctor lines, with `isError` set when any line is FAIL.
 - `mcp-open-ambiguous` refuses to open a weak pick and returns candidates with ids.
@@ -32,6 +33,7 @@ Preconditions:
 - **Read a non-KPI id.** Take a candidate whose `kind` is not `kpi`. Run `$V mcp-bare mcp-read-not-kpi celonis_read '{"id":"<that id>"}'`. `isError: true`, `reason` starts `read needs a KPI`, and `url` is set.
 - **Unknown id.** Run `$V mcp-bare mcp-unknown-id celonis_open '{"id":"no-such-id"}'`, then the same with `celonis_read`. Both `isError: true` with `reason` starting `unknown id 'no-such-id'` and naming `celonis_search`.
 - **Neither or both.** Run `$V mcp-bare mcp-one-of celonis_open '{}'`. `isError: true` with `pass exactly one of id (from celonis_search) or phrase`.
+- **Bad arguments.** Run `$V mcp-bare mcp-bad-id celonis_open '{"id":["x"]}'`, `$V mcp-bare mcp-no-phrase celonis_search '{}'`, and `$V mcp-bare mcp-bad-k celonis_search '{"phrase":"x","k":true}'`. Each is `isError: true` with exactly one short line (`id must be a string`, `phrase is required`, `k must be an integer from 1 to 50`) and no traceback or file path in the result text.
 - **Resolve.** Run `$V mcp mcp-resolve celonis_resolve '{"phrase":"show the KPI for order cycle time"}'`. The `id 2` result text is JSON with `hit.kind: "kpi"`, a non-empty `hit.id`, `next: "open_url"`, and `isError: false`.
 - **Doctor.** Run `$V mcp mcp-doctor celonis_doctor`. The result text holds the same lines as `doctor.txt`, and `isError` is `true` exactly when those lines contain FAIL (no browser counts as FAIL).
 - **Ambiguous open.** Run `$V mcp mcp-open-ambiguous celonis_open '{"phrase":"open the operations dashboard"}'`. The result text has `opened: false`, `ambiguous: true`, a `candidates` list where every entry has an `id`, and `next` says to ask the user and call `celonis_open` with the chosen id.

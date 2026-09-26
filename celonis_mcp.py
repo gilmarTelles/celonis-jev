@@ -86,11 +86,37 @@ def _text(payload, is_error: bool = False) -> dict:
     return {"content": [{"type": "text", "text": body}], "isError": is_error}
 
 
-def _one_of(args: dict) -> str | None:
-    """The boundary check for open/read: an error message, or None when args are usable."""
-    if bool(args.get("id")) == bool(args.get("phrase")):
-        return "pass exactly one of id (from celonis_search) or phrase"
-    return None
+NEEDS = {"celonis_search": "phrase", "celonis_resolve": "phrase",
+         "celonis_open": "id|phrase", "celonis_read": "id|phrase"}
+
+
+def parse_args(name: str, raw) -> tuple[dict, str | None]:
+    """The tool boundary: cleaned arguments, or a short message saying what is wrong.
+
+    Strings are stripped and an empty one counts as absent, so the handlers can
+    trust `args["phrase"]`, `args.get("id")` and `args["k"]`.
+    """
+    if not isinstance(raw, dict):
+        return {}, "arguments must be a JSON object"
+    args: dict = {}
+    for key in ("phrase", "id", "pql"):
+        value = raw.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            return {}, f"{key} must be a string"
+        if value.strip():
+            args[key] = value.strip()
+    k = raw.get("k", 10)
+    if isinstance(k, bool) or not isinstance(k, int) or not 1 <= k <= 50:
+        return {}, "k must be an integer from 1 to 50"
+    args["k"] = k
+    need = NEEDS.get(name)
+    if need == "phrase" and "phrase" not in args:
+        return {}, "phrase is required"
+    if need == "id|phrase" and ("id" in args) == ("phrase" in args):
+        return {}, "pass exactly one of id (from celonis_search) or phrase"
+    return args, None
 
 
 def _tab() -> dict | None:
@@ -102,10 +128,7 @@ def _tab() -> dict | None:
 
 
 def search(args: dict) -> dict:
-    k = args.get("k", 10)
-    if not isinstance(k, int) or not 1 <= k <= 50:
-        return _text("k must be an integer from 1 to 50", is_error=True)
-    return _text(C.search_report(args["phrase"], R.Index(), k))
+    return _text(C.search_report(args["phrase"], R.Index(), args["k"]))
 
 
 def resolve(args: dict) -> dict:
@@ -129,9 +152,6 @@ def _opened(name: str, kind: str, url: str, handle: str, warnings: list[str], **
 
 
 def open_(args: dict) -> dict:
-    bad = _one_of(args)
-    if bad:
-        return _text(bad, is_error=True)
     index = R.Index()
     if args.get("id"):
         try:
@@ -155,9 +175,6 @@ def open_(args: dict) -> dict:
 
 
 def read(args: dict) -> dict:
-    bad = _one_of(args)
-    if bad:
-        return _text(bad, is_error=True)
     index = R.Index()
     warnings: list[str] = []
     if args.get("id"):
@@ -212,10 +229,14 @@ def call(name: str, args: dict) -> dict:
     run = HANDLERS.get(name)
     if run is None:
         return _text(f"unknown tool: {name}", is_error=True)
+    args, bad = parse_args(name, args)
+    if bad:
+        return _text(bad, is_error=True)
     try:
         return run(args)
     except Exception as e:
-        return _text(f"{type(e).__name__}: {e}\n{traceback.format_exc()[-400:]}", is_error=True)
+        traceback.print_exc(file=sys.stderr)
+        return _text(f"{type(e).__name__}: {e}", is_error=True)
 
 
 def handle(msg: dict) -> dict | None:
