@@ -10,23 +10,34 @@ Each case runs two ways: code alone (`resolve_code_only`) and the full resolver
 with Jev (`resolve`). Recall@10/@30 says whether BM25 put a right entry where the
 judgment could see it. The resolver is driven from outside and never edited.
 
+`--judges code,jev,agent` adds a third way: the calling agent itself, shown the
+request and the `celonis_search` candidates exactly as the MCP tool returns them,
+picks one id or none. It runs headless Claude Code (`claude -p`) with no tools
+and no project settings, so it costs money on the user's Claude account.
+
   --live      the tenant's name search and Jev over the network; records the name
               search into bench/eval-cassette.json and every Jev answer into cache/
   --offline   (default) replays both; no credentials, no network. A miss is an
               error on that case, never a silent empty answer.
+  Agent answers are recorded in bench/agent-cache/; --live reuses a recorded
+  answer for the same model and prompt unless --fresh-agent asks for a new one.
 
 Run:  python3 celonis_eval.py --build-cases        labels -> ids, fails on a stale label
       python3 celonis_eval.py --live --baseline    record, score, keep as the baseline
       python3 celonis_eval.py --offline            replay and compare to the baseline
       python3 celonis_eval.py --only e001,e002
+      python3 celonis_eval.py --live --judges code,jev,agent --fresh-agent
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import statistics
+import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -41,7 +52,8 @@ CASSETTE = BENCH / "eval-cassette.json"
 BASELINE = BENCH / "eval-baseline.json"
 BUCKETS = ("exact", "overlap", "paraphrase")
 DETERMINISTIC = ("alias", "literal", "column")
-
+AGENT_CACHE = BENCH / "agent-cache"
+JUDGES = ("code", "jev", "agent")
 
 
 class ReplayMiss(RuntimeError):
@@ -49,6 +61,10 @@ class ReplayMiss(RuntimeError):
 
 
 class CassetteMiss(RuntimeError):
+    pass
+
+
+class AgentMiss(RuntimeError):
     pass
 
 
@@ -139,6 +155,106 @@ def _no_network(*_a, **_k):
     raise RuntimeError("offline eval reached celonis_api")
 
 
+# --- the calling agent as a judge ---------------------------------------------
+
+AGENT_SYSTEM = ("You pick which Celonis item a user means from search candidates. "
+                "Answer with JSON only.")
+
+
+def candidates_for_agent(cands: list[dict]) -> list[dict]:
+    """A candidate as the MCP celonis_search tool shows it, minus the url."""
+    return [{k: v for k, v in c.items() if k != "url"} for c in cands]
+
+
+def agent_prompt(phrase: str, cands: list[dict]) -> str:
+    listed = json.dumps({"candidates": candidates_for_agent(cands)}, indent=1, ensure_ascii=False)
+    return (f"The user asked: {json.dumps(phrase, ensure_ascii=False)}\n\n"
+            f"celonis_search returned:\n{listed}\n\n"
+            'Reply with one JSON object: {"pick": "<candidate id>"} for the candidate the user '
+            'means, or {"pick": "none"} when none of the candidates is what they asked for.')
+
+
+def call_claude(prompt: str, model: str) -> dict:
+    """One headless Claude Code turn: no tools, no settings, an empty cwd."""
+    cmd = ["claude", "-p", "--model", model, "--output-format", "json", "--tools", "",
+           "--no-session-persistence", "--setting-sources", "", "--system-prompt", AGENT_SYSTEM]
+    with tempfile.TemporaryDirectory() as cwd:
+        t = time.perf_counter()
+        done = subprocess.run(cmd, input=prompt, capture_output=True, text=True, cwd=cwd,
+                              timeout=180)
+        wall_ms = (time.perf_counter() - t) * 1000
+    try:
+        out = json.loads(done.stdout)
+    except json.JSONDecodeError:
+        raise AgentMiss(f"claude exited {done.returncode}: {(done.stderr or done.stdout)[:200]}")
+    if out.get("is_error"):
+        raise AgentMiss(f"claude reported an error: {str(out.get('result'))[:200]}")
+    return {"model": model, "result": out.get("result", ""),
+            "duration_api_ms": out.get("duration_api_ms"), "cost_usd": out.get("total_cost_usd", 0.0),
+            "usage": out.get("usage"), "wall_ms": round(wall_ms, 1)}
+
+
+def agent_answer(prompt: str, model: str, mode: str) -> dict:
+    """The recorded answer (offline, live) or a new one (live on a miss, fresh)."""
+    path = AGENT_CACHE / f"{hashlib.sha256((model + prompt).encode()).hexdigest()[:32]}.json"
+    if mode != "fresh" and path.exists():
+        return json.loads(path.read_text()) | {"replayed": True}
+    if mode == "offline":
+        raise AgentMiss(f"no recorded agent answer {path.name}; rerun with --live")
+    got = call_claude(prompt, model)
+    got["pick_raw"] = got["result"]
+    AGENT_CACHE.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(got, indent=1, ensure_ascii=False) + "\n")
+    return got | {"replayed": False}
+
+
+def parse_pick(text: str, cands: list[dict]) -> str:
+    """The picked id, or 'none'. Anything else is a malformed answer."""
+    try:
+        got = json.loads(text.strip())
+    except json.JSONDecodeError:
+        raise ValueError(f"not JSON: {text[:80]!r}")
+    pick = got.get("pick") if isinstance(got, dict) else None
+    ids = {c["id"] for c in cands} | {x["id"] for c in cands for x in c["copies"]}
+    if pick != "none" and pick not in ids:
+        raise ValueError(f"pick {pick!r} is not a candidate id")
+    return pick
+
+
+def agent_resolution(phrase: str, pick: str, index: R.Index) -> R.Resolution:
+    if pick == "none":
+        return R.Resolution(phrase=phrase, path="agent")
+    e = index.by_ref[pick]
+    return R.Resolution(phrase=phrase, path="agent", name=e["name"], kind=e["kind"],
+                        entity_id=e["id"])
+
+
+def run_agent(case: dict, index: R.Index, model: str, mode: str) -> dict:
+    phrase = case["phrase"]
+    t = time.perf_counter()
+    cands = R.search(phrase, index, k=10)
+    row = {"search_ms": (time.perf_counter() - t) * 1000}
+    if case["expect"]:
+        row["search_recall10"] = any(index.by_ref[c["id"]]["id"] in case["expect_ids"]
+                                     for c in cands)
+    else:
+        row["search_recall10"] = None
+    res = None
+    try:
+        ans = agent_answer(agent_prompt(phrase, cands), model, mode)
+        row |= {"agent_raw": ans["result"], "agent_api_ms": ans["duration_api_ms"],
+                "agent_wall_ms": ans["wall_ms"], "agent_cost": ans["cost_usd"],
+                "agent_replayed": ans["replayed"],
+                "agent_ms": row["search_ms"] + (ans["duration_api_ms"] or 0)}
+        pick = parse_pick(ans["result"], cands)
+        row["agent_id"] = pick
+        res = agent_resolution(phrase, pick, index)
+    except (AgentMiss, ValueError, TypeError, OSError, subprocess.TimeoutExpired) as e:
+        row["agent_error"] = f"{type(e).__name__}: {e}"
+    row |= {"agent_ok": correct(res, case), "agent_pick": pick_of(res)}
+    return row
+
+
 # --- scoring ------------------------------------------------------------------
 
 def correct(res: R.Resolution | None, case: dict) -> bool:
@@ -150,13 +266,13 @@ def correct(res: R.Resolution | None, case: dict) -> bool:
     return bool(res.entity_id) and res.entity_id in case["expect_ids"]
 
 
-def pick(res: R.Resolution | None) -> dict:
+def pick_of(res: R.Resolution | None) -> dict:
     if res is None:
         return {}
     return {"name": res.name, "kind": res.kind, "path": res.path, "confirm": res.confirm}
 
 
-def run_case(case: dict, index: R.Index, client) -> dict:
+def run_case(case: dict, index: R.Index, client, agent: tuple[str, str] | None) -> dict:
     phrase, row = case["phrase"], {"id": case["id"], "bucket": case["bucket"],
                                    "phrase": case["phrase"], "absent": not case["expect"]}
     if case["expect"]:
@@ -177,19 +293,21 @@ def run_case(case: dict, index: R.Index, client) -> dict:
     except (ReplayMiss, CassetteMiss) as e:
         row["error"] = str(e)
     passes = trail.data["passes"]
-    row |= {"code_ok": correct(code, case), "code_pick": pick(code),
-            "jev_ok": correct(hit, case), "jev_pick": pick(hit),
+    row |= {"code_ok": correct(code, case), "code_pick": pick_of(code),
+            "jev_ok": correct(hit, case), "jev_pick": pick_of(hit),
             "jev_confirm": bool(hit and hit.confirm), "path": hit.path if hit else None,
             "calls": hit.calls if hit else 0, "tokens": hit.tokens if hit else 0,
             "deterministic": bool(hit and hit.path in DETERMINISTIC),
             "jev_net_s": round(sum(p.get("latency_s", 0.0) for p in passes), 3),
             "jev_cached": any(p.get("cached") for p in passes),
             "warnings": sorted({w for r in (code, hit) if r for w in r.warnings})}
+    if agent:
+        row |= run_agent(case, index, *agent)
     return row
 
 
 def summarize(rows: list[dict]) -> dict:
-    out = {}
+    out, agent = {}, any("agent_ok" in r for r in rows)
     for b in BUCKETS + ("ALL",):
         rs = [r for r in rows if b == "ALL" or r["bucket"] == b]
         present = [r for r in rs if not r["absent"]]
@@ -205,6 +323,13 @@ def summarize(rows: list[dict]) -> dict:
                   "calls": sum(r["calls"] for r in rs), "tokens": sum(r["tokens"] for r in rs),
                   "errors": sum(1 for r in rs if r.get("error")),
                   "degraded": sum(1 for r in rs if r.get("warnings"))}
+        if agent:
+            out[b] |= {"agent_ok": sum(r["agent_ok"] for r in rs),
+                       "search_recall10": sum(bool(r["search_recall10"]) for r in present),
+                       "median_agent_ms": med("agent_ms"),
+                       "median_agent_wall_ms": med("agent_wall_ms"),
+                       "agent_cost_usd": round(sum(r.get("agent_cost") or 0 for r in rs), 4),
+                       "agent_errors": sum(1 for r in rs if r.get("agent_error"))}
     return out
 
 
@@ -216,35 +341,52 @@ def _frac(k: int, n: int) -> str:
 
 def print_table(summary: dict, mode: str) -> None:
     ms = "median ms (replay)" if mode == "offline" else "median ms"
-    print(f"\n{'bucket':<11} {'n':>3}  {'code-only':<11} {'jev':<11} {'jev no-confirm':<14} "
-          f"{'recall@10':<11} {'recall@30':<11} {ms + ' code/jev':<28} {'calls':>5} {'tokens':>7}")
+    agent = "agent_ok" in summary["ALL"]
+    head = (f"\n{'bucket':<11} {'n':>3}  {'code-only':<11} {'jev':<11} {'jev no-confirm':<14} "
+            f"{'recall@10':<11} {'recall@30':<11} {ms + ' code/jev':<28} {'calls':>5} {'tokens':>7}")
+    if agent:
+        head += (f"  {'agent':<11} {'search@10':<11} {'agent ms (search+api)':>21} "
+                 f"{'agent wall ms':>13}")
+    print(head)
     for b, s in summary.items():
-        print(f"{b:<11} {s['n']:>3}  {_frac(s['code_ok'], s['n']):<11} {_frac(s['jev_ok'], s['n']):<11} "
-              f"{_frac(s['jev_ok_no_confirm'], s['n']):<14} {_frac(s['recall10'], s['n_present']):<11} "
-              f"{_frac(s['recall30'], s['n_present']):<11} "
-              f"{str(s['median_code_ms']) + ' / ' + str(s['median_jev_ms']):<28} "
-              f"{s['calls']:>5} {s['tokens']:>7,}")
+        line = (f"{b:<11} {s['n']:>3}  {_frac(s['code_ok'], s['n']):<11} {_frac(s['jev_ok'], s['n']):<11} "
+                f"{_frac(s['jev_ok_no_confirm'], s['n']):<14} {_frac(s['recall10'], s['n_present']):<11} "
+                f"{_frac(s['recall30'], s['n_present']):<11} "
+                f"{str(s['median_code_ms']) + ' / ' + str(s['median_jev_ms']):<28} "
+                f"{s['calls']:>5} {s['tokens']:>7,}")
+        if agent:
+            line += (f"  {_frac(s['agent_ok'], s['n']):<11} "
+                     f"{_frac(s['search_recall10'], s['n_present']):<11} "
+                     f"{str(s['median_agent_ms']):>21} {str(s['median_agent_wall_ms']):>13}")
+        print(line)
+    if agent:
+        a = summary["ALL"]
+        print(f"\nagent total cost ${a['agent_cost_usd']:.4f}"
+              + (" (recorded, not spent this run)" if mode == "offline" else "")
+              + f", {a['agent_errors']} agent error(s)")
 
 
 def print_rows(rows: list[dict]) -> None:
     for r in rows:
         mark = lambda ok: "ok" if ok else "--"
         rec = "" if r["absent"] else f" r10={int(r['recall10'])} r30={int(r['recall30'])}"
+        agent = f" agent {mark(r['agent_ok'])}" if "agent_ok" in r else ""
         print(f"{r['id']} {r['bucket'][:5]:<5} code {mark(r['code_ok'])} jev {mark(r['jev_ok'])}"
-              f"{'?' if r['jev_confirm'] else ' '} {str(r['path']):<12} calls={r['calls']}{rec} "
+              f"{'?' if r['jev_confirm'] else ' '}{agent} {str(r['path']):<12} calls={r['calls']}{rec} "
               f"{r['phrase'][:48]!r} -> {r['jev_pick'].get('name')!r}"
-              + (f"  ERROR {r['error']}" if r.get("error") else ""))
+              + (f"  ERROR {r['error']}" if r.get("error") else "")
+              + (f"  AGENT ERROR {r['agent_error']}" if r.get("agent_error") else ""))
 
 
 def print_disagreements(rows: list[dict]) -> None:
-    diff = [r for r in rows if r["code_ok"] != r["jev_ok"]]
+    judges = [j for j in JUDGES if rows and f"{j}_ok" in rows[0]]
+    diff = [r for r in rows if len({r[f"{j}_ok"] for j in judges}) > 1]
     print(f"\ndisagreements: {len(diff)}")
     for r in diff:
-        side = "code right, jev wrong" if r["code_ok"] else "jev right, code wrong"
-        c, j = r["code_pick"], r["jev_pick"]
-        print(f"  {r['id']} {side}: {r['phrase']!r}\n"
-              f"      code [{c.get('kind')}] {c.get('name')!r} ({c.get('path')})   "
-              f"jev [{j.get('kind')}] {j.get('name')!r} ({j.get('path')})")
+        right = [j for j in judges if r[f"{j}_ok"]]
+        picks = "   ".join(f"{j} [{r[f'{j}_pick'].get('kind')}] {r[f'{j}_pick'].get('name')!r} "
+                           f"({r[f'{j}_pick'].get('path')})" for j in judges)
+        print(f"  {r['id']} right: {', '.join(right) or 'none'}: {r['phrase']!r}\n      {picks}")
 
 
 def print_delta(summary: dict, base: dict) -> None:
@@ -256,7 +398,11 @@ def print_delta(summary: dict, base: dict) -> None:
             continue
         print(f"  {b:<11} code {pct(s, 'code_ok', 'n') - pct(o, 'code_ok', 'n'):+5.1f}pp  "
               f"jev {pct(s, 'jev_ok', 'n') - pct(o, 'jev_ok', 'n'):+5.1f}pp  "
-              f"recall@10 {pct(s, 'recall10', 'n_present') - pct(o, 'recall10', 'n_present'):+5.1f}pp")
+              f"recall@10 {pct(s, 'recall10', 'n_present') - pct(o, 'recall10', 'n_present'):+5.1f}pp"
+              + (f"  agent {pct(s, 'agent_ok', 'n') - pct(o, 'agent_ok', 'n'):+5.1f}pp"
+                 if "agent_ok" in s and "agent_ok" in o else ""))
+    if "agent_ok" in summary["ALL"] and "agent_ok" not in base["summary"].get("ALL", {}):
+        print("  agent: no baseline")
 
 
 # --- entry --------------------------------------------------------------------
@@ -269,8 +415,24 @@ def main() -> None:
     ap.add_argument("--baseline", action="store_true")
     ap.add_argument("--build-cases", action="store_true")
     ap.add_argument("--only", default="")
+    ap.add_argument("--judges", default="code,jev",
+                    help="code and jev always run; add agent for the calling-agent judge")
+    ap.add_argument("--agent-model", default="sonnet")
+    ap.add_argument("--fresh-agent", action="store_true",
+                    help="with --live: ask the agent again instead of reusing its recorded answer")
     args = ap.parse_args()
     live = args.live
+    judges = {j.strip() for j in args.judges.split(",") if j.strip()}
+    if not {"code", "jev"} <= judges <= set(JUDGES):
+        ap.error(f"--judges takes code,jev optionally with agent; got {args.judges!r}")
+    if args.fresh_agent and not live:
+        ap.error("--fresh-agent needs --live")
+    agent = None
+    if "agent" in judges:
+        agent = (args.agent_model, "fresh" if args.fresh_agent else "live" if live else "offline")
+        if live and shutil.which("claude") is None:
+            ap.error("the agent judge runs `claude -p`, and no `claude` is on PATH; install "
+                     "Claude Code or drop agent from --judges")
 
     index = R.Index()
     if args.build_cases:
@@ -293,9 +455,12 @@ def main() -> None:
         R.named_lookup = replaying_lookup(cassette["named_lookup"])
         client = ReplayJev()
 
-    rows = [run_case(c, index, client) for c in cases]
-    if live:
-        CASSETTE.write_text(json.dumps(cassette, indent=1, ensure_ascii=False) + "\n")
+    try:
+        rows = [run_case(c, index, client, agent) for c in cases]
+    finally:
+        # A crash mid-run keeps the name searches it already paid for.
+        if live:
+            CASSETTE.write_text(json.dumps(cassette, indent=1, ensure_ascii=False) + "\n")
 
     name = "live" if live else "offline"
     summary = summarize(rows)

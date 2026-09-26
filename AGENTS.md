@@ -105,6 +105,7 @@ python3 celonis_eval.py --build-cases        # labels -> index ids; fails on a s
 python3 celonis_eval.py --live --baseline    # tenant + Jev; records, scores, keeps a baseline
 python3 celonis_eval.py --offline            # replay only: no credentials, no network
 python3 celonis_eval.py --only e001,e002
+python3 celonis_eval.py --live --judges code,jev,agent   # add the calling agent as a judge
 ```
 
 `celonis_eval.py` scores the resolver with and without Jev per bucket (exact,
@@ -117,6 +118,18 @@ each index refresh. A `--live` run records the tenant name search into
 both and reports a miss as an error on that case. Results land in
 `bench/eval-<mode>-<timestamp>.json`. The harness drives the resolver from
 outside; it never changes resolver behaviour.
+
+`--judges code,jev,agent` adds a third judge: the calling agent picking from
+`celonis_search` candidates, as a host LLM sees them over MCP. Each case sends
+the request and the candidate list (names, kinds, containers) to Anthropic
+through the user's own Claude account via headless `claude -p` (no tools, no
+project settings, `--agent-model`, default `sonnet`), so it costs money: about
+one cent a case with sonnet (measured: $0.68 for 62 cases). It is opt-in for that reason; the default stays
+`code,jev`. Answers are recorded in `bench/agent-cache/`; `--live` reuses them
+unless `--fresh-agent` asks again, and `--offline` replays them without ever
+starting the CLI. A reply that is not bare JSON (a fenced ```json block
+included) scores as a malformed answer. Agent latency is reported as search plus the model turn, and
+separately as wall time including CLI startup.
 
 ## Verification
 
