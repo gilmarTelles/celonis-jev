@@ -5,6 +5,8 @@ cannot bridge. When a local Ollama serves an embedding model, every index entry
 is embedded once by `python3 celonis_index.py --embed` (cached in
 cache/embeddings-<model>.json, keyed by entry text) and the ask is embedded at
 search time; `search()` fuses that ranking with BM25.
+An entry described by `celonis_index.py --describe` embeds its description too:
+a code or terse name alone gives a paraphrase nothing to match.
 
 Search never embeds the index. It ranks the entries that already have a vector
 and leaves the rest to BM25. A query embed that fails or stalls (5 s budget)
@@ -86,9 +88,31 @@ def words(name: str) -> str:
     return re.sub(r"[_\-./]+", " ", s).strip()
 
 
-def entry_text(e: dict) -> str:
+def descriptions_path(built: str) -> Path:
+    """Generated descriptions for the index built at `built`; a rebuilt index drops stale ones."""
+    return CACHE / f"descriptions-{built.replace(':', '-')}.json"
+
+
+def load_descriptions(built: str) -> dict[tuple[str, str], str]:
+    """What each (kind, name) is for, from `celonis_index.py --describe`; empty when absent."""
+    try:
+        items = json.loads(descriptions_path(built).read_text())["items"]
+    except (OSError, ValueError, TypeError, KeyError):
+        return {}
+    out = {}
+    for key, d in items.items():
+        kind, _, name = key.partition("\t")
+        if isinstance(d, dict) and isinstance(d.get("description"), str) and d["description"].strip():
+            out[(kind, name)] = d["description"].strip()
+    return out
+
+
+def entry_text(e: dict, descriptions: dict[tuple[str, str], str] | None = None) -> str:
     kind = KIND_TEXT.get(e["kind"], e["kind"].replace("_", " ").replace("-", " "))
     text = f"{kind}: {words(e['name'])}"
+    said = (descriptions or {}).get((e["kind"], e["name"]))
+    if said:
+        return f"{text}. {said}"
     where = e.get("package") or e.get("space") or e.get("pool")
     if where and e["kind"] not in ("package", "space", "pool"):
         text += f" (in {where})"
@@ -154,15 +178,16 @@ def _embed(texts: list[str], timeout: tuple[float, float]) -> list[array]:
 class Embeddings:
     """Semantic ranking over the cached vectors. `ok` is False until a query embed succeeds."""
 
-    def __init__(self, entries: list[dict]) -> None:
+    def __init__(self, entries: list[dict], built: str = "") -> None:
         self.entries = entries
+        self.built = built
         self.ok = False
         self.vectors: list[tuple[array, dict]] | None = None   # loaded on the first rank()
         self.dim = 0
 
     def _load(self) -> None:
-        stored = load_cache()
-        self.vectors = [(stored[t], e) for e in self.entries if (t := entry_text(e)) in stored]
+        stored, said = load_cache(), load_descriptions(self.built)
+        self.vectors = [(stored[t], e) for e in self.entries if (t := entry_text(e, said)) in stored]
         self.dim = len(self.vectors[0][0]) if self.vectors else 0
 
     @property
@@ -231,7 +256,7 @@ def _save(path: Path, stored: dict[str, array], wanted: set[str]) -> None:
         raise
 
 
-def embed_index(entries: list[dict], required: bool = True) -> None:
+def embed_index(entries: list[dict], built: str = "", required: bool = True) -> None:
     """Embed every entry the cache lacks, checkpointing after each batch.
 
     Resumable and idempotent: a killed run keeps its finished batches, a rerun
@@ -251,7 +276,8 @@ def embed_index(entries: list[dict], required: bool = True) -> None:
                              f"start Ollama and `ollama pull {MODEL}`")
         return
     path = cache_path()
-    wanted = {entry_text(e) for e in entries}
+    said = load_descriptions(built)
+    wanted = {entry_text(e, said) for e in entries}
     stored = {t: v for t, v in load_cache().items() if t in wanted}
     missing = sorted(wanted - set(stored))
     batches = math.ceil(len(missing) / BATCH)

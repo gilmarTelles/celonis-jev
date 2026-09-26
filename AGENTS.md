@@ -117,6 +117,12 @@ step when Ollama answers and skips it silently otherwise. Search ranks the
 entries that have a vector and leaves the rest to BM25; semantic ranking adds
 about 0.15 s a search.
 
+`python3 celonis_index.py --describe` (optional; claude CLI with haiku, about
+$2.6 per index) writes a one-line description of each item, from its own
+metadata, to `cache/descriptions-<index stamp>.json`; the next `--embed` then
+embeds kind, name and description instead of the name alone, so an item named by
+a code or a terse label can match a paraphrase. With no file, entries embed as before.
+
 Without Ollama, or with no embeddings yet, search is BM25 only and the search
 report's `warnings` says so. A query embed that fails or takes over 5 s pauses
 semantic ranking for 5 minutes in that process (one stderr warning), so a stuck
