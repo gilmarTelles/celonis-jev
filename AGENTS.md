@@ -106,6 +106,8 @@ python3 celonis_eval.py --live --baseline    # tenant + Jev; records, scores, ke
 python3 celonis_eval.py --offline            # replay only: no credentials, no network
 python3 celonis_eval.py --only e001,e002
 python3 celonis_eval.py --live --judges code,jev,agent   # add the calling agent as a judge
+python3 celonis_eval.py --recall-only      # BM25 and search recall@k only; no judges, no network, seconds
+python3 celonis_eval.py --cases other.json --build-cases   # any mode on another labelled file
 ```
 
 `celonis_eval.py` scores the resolver with and without Jev per bucket (exact,
