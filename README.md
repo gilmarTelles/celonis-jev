@@ -88,6 +88,21 @@ The installer adds the MCP server to omp and Claude using paths on the local
 machine. The generated project MCP file is ignored; `.mcp.json` is the portable
 repository configuration.
 
+## Semantic search (optional)
+
+`search()` fuses BM25 with a local embedding model when one is available, which
+is what lets a paraphrase find an item whose name shares none of its words.
+
+```bash
+ollama pull mxbai-embed-large     # once; Ollama must be running
+python3 celonis_cli.py search "the view showing how old open items are"
+```
+
+The first search after an index rebuild embeds every entry once (about 8 minutes
+on a laptop, cached under `cache/`); later searches add about 0.15 s. Without
+Ollama, search is BM25 only and says so once on stderr. `CELONIS_EMBED_URL`
+(`off` disables it) and `CELONIS_EMBED_MODEL` override the defaults.
+
 ## Development checks
 
 ```bash
