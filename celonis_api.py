@@ -45,3 +45,14 @@ def get(path: str, timeout: float = 60, **kw):
 def absolute(url: str) -> str:
     """A tenant-relative link, as a URL a browser can open."""
     return url if not url or url.startswith("http") else base() + url
+
+
+NO_TENANT = "no tenant configured (~/.celonis/environments.json); urls are tenant-relative"
+
+
+def absolute_or_relative(url: str) -> tuple[str, list[str]]:
+    """`absolute(url)`, or the url as given plus a warning when no tenant is configured."""
+    try:
+        return absolute(url), []
+    except (OSError, KeyError, ValueError):
+        return url, [NO_TENANT]

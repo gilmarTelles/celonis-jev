@@ -1,5 +1,8 @@
 """celonis - ask in words, land on the thing.
 
+    celonis search "<phrase>"      candidates with ids, copies collapsed (no Jev)
+    celonis open --id <id>         open one candidate in Chrome, or print its link
+    celonis read --id <id>         run one KPI candidate's PQL, show the rows
     celonis ask "<phrase>"         resolve and go there, or print the link
     celonis resolve "<phrase>"     where does this point?          (Jev)
     celonis open "<phrase>"        resolve, then open it in Chrome
@@ -19,6 +22,7 @@
     celonis tabs                   what the signed-in browser has open
     celonis index                  rebuild the local index
 
+`search` needs only the local index: no Jev key, no tenant, no browser.
 `resolve`/`open` need no browser at all; `read` runs the PQL through the
 signed-in tab (CDP), because the query engine wants the app session.
 
@@ -474,8 +478,66 @@ def cmd_kpis(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
     return 0
 
 
+def search_report(phrase: str, index: R.Index, k: int = 10) -> dict:
+    """`R.search` with browser-ready urls when a tenant is configured."""
+    candidates, warnings = R.search(phrase, index, k), []
+    for c in candidates:
+        c["url"], warnings = celonis_api.absolute_or_relative(c["url"])
+    return {"candidates": candidates, "index_built": index.built,
+            "next": "pick one and call celonis_open or celonis_read with its id",
+            "warnings": warnings}
+
+
+def navigate(url: str) -> bool:
+    """Point the signed-in tab at `url`. False when there is no browser to drive."""
+    if not url.startswith("http"):
+        return False
+    try:
+        tab = cdp.find_tab("celonis.cloud") or cdp.new_tab(url)
+        cdp.navigate(tab, url)
+        return True
+    except Exception:
+        return False
+
+
+def cmd_search(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
+               pql: str | None) -> int:
+    report = search_report(phrase, index, int(cliargs.flag(opts, "--limit") or 10))
+    if "--json" in flags:
+        print(json.dumps(report, indent=1))
+        return 0 if report["candidates"] else 2
+    for w in report["warnings"]:
+        print(f"  ! {w}")
+    for c in report["candidates"]:
+        tag = f" exact ({c['why']})" if c.get("exact") else ""
+        copies = f"  x{c['instances']}" if c["instances"] > 1 else ""
+        print(f"  {c['score']:>6.2f}  [{c['kind']}] {c['name']}{copies}{tag}")
+        print(f"          id {c['id']}   {c['container']}")
+        print(f"          {c['url']}")
+    if not report["candidates"]:
+        print(f"  nothing in the index shares a word with {phrase!r}")
+    return 0 if report["candidates"] else 2
+
+
+def cmd_open_id(handle: str, index: R.Index) -> int:
+    try:
+        entry = R.entry_for(handle, index)
+    except LookupError as e:
+        print(f"  {e}")
+        return 2
+    full, warnings = celonis_api.absolute_or_relative(entry["url"])
+    for w in warnings:
+        print(f"  ! {w}")
+    print(f"  [{entry['kind']}] {entry['name']}")
+    print(f"  opened: {full}" if navigate(full) else f"  no browser to open; link: {full}")
+    return 0
+
+
 def cmd_ask(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
             pql: str | None) -> int:
+    handle = cliargs.flag(opts, "--id")
+    if handle and cmd == "open":
+        return cmd_open_id(handle, index)
     use_jev = "--no-jev" not in flags
     if use_jev:
         hit = R.resolve(phrase, index=index, verbose=(cmd == "resolve" and "--json" not in flags))
@@ -501,12 +563,7 @@ def cmd_ask(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
         return 3
     if cmd in ("open", "ask") and hit.url:
         full = celonis_api.absolute(hit.url)
-        try:
-            tab = cdp.find_tab("celonis.cloud") or cdp.new_tab(full)
-            cdp.navigate(tab, full)
-            print(f"  opened: {full}")
-        except Exception as e:
-            print(f"  no browser to open ({type(e).__name__}); link: {full}")
+        print(f"  opened: {full}" if navigate(full) else f"  no browser to open; link: {full}")
         # Navigating to it is accepting it: the phrase joins the vocabulary, so
         # the next time it is a lookup instead of a judgment. Only judged
         # resolutions are worth learning - the deterministic paths already
@@ -522,7 +579,18 @@ def cmd_read(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
     use_jev = "--no-jev" not in flags
     t0 = time.perf_counter()
     hit = None
-    if pql is None:
+    handle = cliargs.flag(opts, "--id")
+    title = ""
+    if handle:
+        try:
+            k, km = P.kpi_definition(R.entry_for(handle, index), index)
+        except LookupError as e:
+            print(f"  {e}")
+            print(f"  open it with: celonis open --id {handle}")
+            return 2
+        pql = pql or k["pql"]
+        title = f'{handle} -> KPI {k.get("displayName") or k.get("id")}'
+    elif pql is None:
         hit = (R.resolve(phrase, index=index, verbose=False) if use_jev
                else R.resolve_code_only(phrase, index))
         for w in hit.warnings:
@@ -539,18 +607,24 @@ def cmd_read(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
             pql = k["pql"]
             hit.kpi = {"id": k.get("id"), "displayName": k.get("displayName"),
                        "format": k.get("format")}
+            title = f'"{phrase}" -> KPI {hit.kpi.get("displayName") or hit.name}'
         else:
             print(f'"{phrase}" resolved to [{hit.kind}] {hit.name} — not a KPI, no value to run')
             print(f"  open it with: celonis open {phrase!r}")
             return 0
     else:
         km = R.km_for_ask(phrase, index)
-    tab = cdp.find_tab("celonis.cloud") or \
-        cdp.new_tab(celonis_api.base() + "/package-manager/ui/views/ui/spaces")
+    try:
+        tab = cdp.find_tab("celonis.cloud") or \
+            cdp.new_tab(celonis_api.base() + "/package-manager/ui/views/ui/spaces")
+    except OSError as e:
+        print(f"  {title}\n  PQL   {P.pql_table(pql)[:110]}")
+        print(f"  no CDP browser to run it in ({type(e).__name__}); see: celonis doctor")
+        return 1
     out = P.execute(pql, km, index, tab)
     total = (time.perf_counter() - t0) * 1000
-    if hit:
-        print(f'"{phrase}" -> KPI {hit.kpi.get("displayName") or hit.name}')
+    if title:
+        print(title)
     print(f"  PQL   {P.pql_table(pql)[:110]}")
     if out["error"]:
         print(f"  error {out['error'][:200]}")
@@ -566,7 +640,7 @@ def cmd_read(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
 COMMANDS = {"tables": cmd_tables, "table": cmd_table, "query": cmd_query, "uses": cmd_uses,
             "columns": cmd_columns, "verify": cmd_verify, "aliases": cmd_aliases,
             "index": cmd_index, "tabs": cmd_tabs, "kpis": cmd_kpis,
-            "resolve": cmd_ask, "open": cmd_ask, "ask": cmd_ask, "read": cmd_read}
+            "search": cmd_search, "resolve": cmd_ask, "open": cmd_ask, "ask": cmd_ask, "read": cmd_read}
 
 
 def main() -> int:
