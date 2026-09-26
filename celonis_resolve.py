@@ -147,6 +147,96 @@ def _contains(q: list[str], w: list[str]) -> bool:
 KINDS = tuple((tuple(_sing(t) for t in w.split()), k) for w, k in KIND_WORDS)
 
 
+# Generic finance / SAP / process-mining synonyms and abbreviations (EN + PT); not tenant data.
+DOMAIN_SYNONYMS = (
+    ("general ledger", "gl", "ledger", "journal", "razao", "contabil"),
+    ("journal entry", "je", "posting", "lancamento", "accounting document"),
+    ("accounts payable", "ap", "payables", "contas pagar", "fornecedores"),
+    ("accounts receivable", "ar", "receivables", "contas receber"),
+    ("vendor", "supplier", "fornecedor", "creditor", "lifnr"),
+    ("customer", "client", "cliente", "debtor", "kunnr", "buyer"),
+    ("invoice", "bill", "fatura", "nota fiscal", "nf", "billing"),
+    ("purchase order", "po", "pedido compra", "ebeln"),
+    ("purchase requisition", "pr", "requisition", "requisicao", "banfn"),
+    ("sales order", "so", "order", "pedido venda", "vbeln"),
+    ("goods receipt", "gr", "receipt", "recebimento", "migo"),
+    ("goods issue", "gi", "delivery", "shipment", "remessa", "entrega"),
+    ("payment", "remittance", "pagamento", "paid", "settlement", "disbursement"),
+    ("cash", "caixa", "treasury", "tesouraria", "bank", "banco"),
+    ("aging", "ageing", "overdue", "past due", "days outstanding", "vencido", "atraso", "late"),
+    ("dso", "days sales outstanding", "collection period"),
+    ("dpo", "days payable outstanding"),
+    ("dio", "days inventory outstanding"),
+    ("due date", "vencimento", "maturity", "net due"),
+    ("discount", "desconto", "cash discount", "early payment"),
+    ("payment terms", "terms", "condicao pagamento", "zterm"),
+    ("dashboard", "view", "board", "painel", "report", "relatorio"),
+    ("kpi", "metric", "indicator", "measure", "indicador", "kpis"),
+    ("cycle time", "throughput time", "lead time", "duration", "tempo ciclo"),
+    ("rework", "retrabalho", "repetition", "loop"),
+    ("automation rate", "automation", "touchless", "no touch", "automacao"),
+    ("manual", "user", "human", "manually"),
+    ("variant", "path", "variante"),
+    ("activity", "event", "step", "atividade", "evento"),
+    ("case", "process instance", "caso"),
+    ("conformance", "compliance", "deviation", "violation"),
+    ("maverick", "off contract", "non compliant"),
+    ("company code", "bukrs", "entity", "empresa", "legal entity"),
+    ("plant", "werks", "site", "planta", "centro"),
+    ("material", "product", "item", "sku", "matnr", "produto"),
+    ("inventory", "stock", "estoque", "warehouse"),
+    ("cost center", "kostl", "centro custo"),
+    ("profit center", "prctr", "centro lucro"),
+    ("tax", "vat", "imposto", "tributo", "icms", "withholding"),
+    ("credit memo", "credit note", "nota credito"),
+    ("debit memo", "debit note", "nota debito"),
+    ("amount", "value", "valor", "net value", "total"),
+    ("currency", "moeda", "waers"),
+    ("revenue", "sales", "receita", "vendas", "faturamento", "turnover"),
+    ("expense", "cost", "custo", "despesa", "spend", "spending"),
+    ("procurement", "purchasing", "p2p", "purchase to pay", "compras", "sourcing"),
+    ("order to cash", "o2c", "otc"),
+    ("record to report", "r2r", "closing", "close", "fechamento"),
+    ("month end", "period end", "period close"),
+    ("accrual", "provisao", "provision"),
+    ("reconciliation", "recon", "conciliacao", "matching", "match"),
+    ("three way match", "3 way match", "3wm"),
+    ("blocked", "block", "hold", "bloqueio", "bloqueado"),
+    ("approval", "release", "aprovacao", "workflow"),
+    ("contract", "agreement", "contrato", "outline agreement"),
+    ("duplicate", "duplicated", "duplicidade", "double"),
+    ("fiscal year", "fy", "gjahr", "exercicio"),
+    ("period", "month", "periodo", "mes"),
+    ("user", "usuario", "resource"),
+    ("master data", "cadastro", "mdm"),
+    ("change", "update", "alteracao", "modification", "modified"),
+    ("cancel", "cancellation", "reversal", "storno", "estorno", "reversed"),
+    ("dunning", "collection", "cobranca", "reminder"),
+    ("working capital", "wc", "capital giro"),
+    ("on time", "otd", "punctual", "pontual"),
+    ("backlog", "open", "pending", "aberto", "pendente", "outstanding"),
+    ("data model", "knowledge model", "semantic model", "model"),
+    ("data pool", "pool", "data source"),
+    ("table", "tabela", "dataset"),
+    ("action flow", "automation flow", "skill"),
+)
+
+SYNONYM_WEIGHT = 0.5    # an expanded word counts half what the ask's own word counts
+SYNONYM_GROUPS = tuple(tuple(tuple(_sing(t) for t in tokens(m)) for m in g) for g in DOMAIN_SYNONYMS)
+
+
+def expansions(q: list[str]) -> tuple[set[str], int]:
+    """Words the domain table adds to the ask (singular), and how many groups fired."""
+    qs = tuple(_sing(t) for t in q)
+    out: set[str] = set()
+    fired = 0
+    for g in SYNONYM_GROUPS:
+        if any(_contains(qs, m) for m in g):
+            fired += 1
+            out.update(t for m in g for t in m)
+    return out - set(qs), fired
+
+
 def implied_kind(phrase: str) -> str | None:
     """The kind the ask says in words, or None. Deterministic - no model.
 
@@ -296,6 +386,7 @@ class Index:
         self.n = max(1, len(self.entries))
         self._boosts: dict[str, dict] = {}
         self._semantic: "celonis_embed.Embeddings | None" = None
+        self._syn: dict[str, set[str]] = {}
 
     @property
     def semantic(self) -> "celonis_embed.Embeddings":
@@ -303,6 +394,11 @@ class Index:
         if self._semantic is None:
             self._semantic = celonis_embed.Embeddings(self.entries, self.built)
         return self._semantic
+
+    def _expanded(self, phrase: str) -> set[str]:
+        if phrase not in self._syn:
+            self._syn[phrase] = {stem(t) for t in expansions(tokens(phrase))[0]} - set(stems(phrase))
+        return self._syn[phrase]
 
     def idf(self, t: str) -> float:
         return math.log(1 + self.n / (1 + self.df.get(t, 0)))
@@ -343,9 +439,13 @@ class Index:
         name = set(stems(e["name"]) + stems(e.get("key", "")))
         ctx = set(stems(f'{e.get("package","")} {e.get("space","")} {e.get("pool","")}'))
         s = sum(self.idf(t) * (2.0 if t in name else 0.5 if t in ctx else 0.0) for t in q)
+        extra = self._expanded(phrase)
+        if extra:
+            s += SYNONYM_WEIGHT * sum(self.idf(t) * (2.0 if t in name else 0.5 if t in ctx else 0.0)
+                                      for t in extra)
         if e["name"].lower() in phrase.lower():
             s += 4.0
-        if e["kind"] == "table" and not set(q) & name:
+        if e["kind"] == "table" and not set(q) & name and not extra & name:
             # A table is its name plus its columns. Container context alone is
             # not evidence: large pools contain many unrelated tables.
             held = {str(c).lower() for c in (e.get("columns") or [])}
