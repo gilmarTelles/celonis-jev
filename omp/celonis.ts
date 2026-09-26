@@ -48,13 +48,22 @@ function run(args: string[], timeoutMs = 180_000): string {
 				`Set CELONIS_JEV_HOME to the clone that contains celonis_cli.py.`,
 		);
 	}
-	return execFileSync("python3", [join(dir, "celonis_cli.py"), ...args], {
-		cwd: dir,
-		encoding: "utf8",
-		timeout: timeoutMs,
-		maxBuffer: 8 * 1024 * 1024,
-		env: { ...process.env, PYTHONUNBUFFERED: "1" },
-	}).trim();
+	try {
+		return execFileSync("python3", [join(dir, "celonis_cli.py"), ...args], {
+			cwd: dir,
+			encoding: "utf8",
+			timeout: timeoutMs,
+			maxBuffer: 8 * 1024 * 1024,
+			env: { ...process.env, PYTHONUNBUFFERED: "1" },
+		}).trim();
+	} catch (e) {
+		// A nonzero exit with output is the CLI's answer (no match 2, ambiguous 3, doctor FAIL 1).
+		// Anything on stderr (a traceback) rides along, so a crash never reads as a clean answer.
+		const { status, stdout, stderr } = e as { status?: number | null; stdout?: string; stderr?: string };
+		if (typeof status !== "number" || !stdout?.trim()) throw e;
+		const err = stderr?.trim();
+		return err ? `${stdout.trim()}\n\n[exit ${status}] ${err}` : stdout.trim();
+	}
 }
 
 const text = (body: string): ToolResult => ({
