@@ -12,7 +12,9 @@ This directory is the maintained source for verifying what a user of celonis-jev
 
 ## Driving conventions
 
-- Run CLI actions through `$V cli <label> -- <args>`, page API calls through `$V view-get`, and MCP calls through `$V mcp` (or `$V mcp-bare` for a call with no Jev key and no tenant config).
+- Run CLI actions through `$V cli <label> -- <args>`, page API calls through `$V view-get`, and MCP calls through `$V mcp` (or `$V mcp-bare` for a call with no Jev key and no tenant config). Run anything else a recipe needs from the repo root through `$V run <label> -- <command>`.
+- Assert on a captured JSON result with `$V check <label> '<python expression>'`. It prints `PASS` or `FAIL` and appends to `<label>.check`.
+- Set `CELONIS_EMBED_URL` or `CELONIS_EMBED_MODEL` in front of `$V`. The helper records them at the top of `<label>.cmd`.
 - Use labels shaped `<feature-id>-<entry>`, for example `resolve-json-kpi`, so the evidence names itself.
 - Add `--no-learn` to every `ask`/`open` unless the recipe proves learning.
 - Take tenant-specific names from a read in the same run. The names in these files were true when written and can drift.
@@ -36,3 +38,7 @@ Each feature file starts with an H1 title and one paragraph describing user-visi
 - [Trace page](./view.md) covers `celonis view`: status, traced resolve, and the page UI.
 - [MCP server](./mcp.md) covers the five stdio tools agents call, including search and open/read by id with no key.
 - [Data layer](./data-layer.md) covers `tables`, `table`, `query`, and the read-only SQL guard.
+- [Search ranking, semantic on and off](./search-ranking.md) covers what `CELONIS_EMBED_URL=off` changes in `search` and what it must not: the exact lead, container order, `rank`, `warnings`, and stopword-only asks.
+- [Embed the index](./embed-index.md) covers `celonis_index.py --embed`: a fresh build, resume after an interruption, a no-op rerun, and repair of a truncated cache, all on a separate cache file.
+- [Search with the embedding server down](./embed-down.md) covers an unreachable, hung, or failing Ollama, and the breaker that stops one MCP process from asking again.
+- [Describe entries](./describe.md) is a placeholder. `--describe` is not on master yet.
