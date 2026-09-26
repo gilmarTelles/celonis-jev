@@ -33,6 +33,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 import requests
@@ -81,6 +82,36 @@ MIN_ALIAS_TOKENS = 2    # a one-word alias may boost, never answer on its own
 def tokens(s: str) -> list[str]:
     s = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", s or "")     # CustomObjectName -> Custom Object Name
     return [w for w in re.findall(r"[a-z0-9]+", s.lower()) if w not in STOP and len(w) > 1]
+
+
+_VOWEL = re.compile(r"[aeiouy]")
+
+
+@lru_cache(maxsize=1 << 16)
+def stem(w: str) -> str:
+    """A light English suffix strip, so 'postings', 'posting' and 'Posting' score as one word.
+
+    Ranking only: literal matching (decide, kinds, containers) keeps the words as said.
+    """
+    if len(w) <= 3 or not w.isalpha():
+        return w
+    if w.endswith("ies") and len(w) > 4:
+        w = w[:-3] + "y"
+    elif w.endswith("es") and w[-3] in "sxz" or w.endswith(("ches", "shes")):
+        w = w[:-2]
+    elif w.endswith("s") and not w.endswith(("ss", "us", "is")):
+        w = w[:-1]
+    for suf in ("ing", "ed", "ly"):
+        base = w[:-len(suf)]
+        if w.endswith(suf) and len(base) >= 3 and _VOWEL.search(base):
+            w = base[:-1] if len(base) > 3 and base[-1] == base[-2] and base[-1] not in "lsz" else base
+            break
+    return w[:-1] if len(w) > 4 and w.endswith("e") else w
+
+
+@lru_cache(maxsize=1 << 16)
+def stems(s: str) -> tuple[str, ...]:
+    return tuple(stem(t) for t in tokens(s))
 
 
 # The words people use for a kind, longest phrase first. Container words (pool,
@@ -260,7 +291,7 @@ class Index:
         self.columns = columns if columns is not None else Columns()
         self.df: dict[str, int] = {}
         for e in self.entries:
-            for t in set(tokens(e["name"]) + tokens(e.get("key", ""))):
+            for t in set(stems(e["name"]) + stems(e.get("key", ""))):
                 self.df[t] = self.df.get(t, 0) + 1
         self.n = max(1, len(self.entries))
         self._boosts: dict[str, dict] = {}
@@ -306,11 +337,11 @@ class Index:
         return self._boosts[phrase]
 
     def score(self, phrase: str, e: dict) -> float:
-        q = tokens(phrase)
+        q = stems(phrase)
         if not q:
             return 0.0
-        name = set(tokens(e["name"]) + tokens(e.get("key", "")))
-        ctx = set(tokens(f'{e.get("package","")} {e.get("space","")} {e.get("pool","")}'))
+        name = set(stems(e["name"]) + stems(e.get("key", "")))
+        ctx = set(stems(f'{e.get("package","")} {e.get("space","")} {e.get("pool","")}'))
         s = sum(self.idf(t) * (2.0 if t in name else 0.5 if t in ctx else 0.0) for t in q)
         if e["name"].lower() in phrase.lower():
             s += 4.0
@@ -318,12 +349,13 @@ class Index:
             # A table is its name plus its columns. Container context alone is
             # not evidence: large pools contain many unrelated tables.
             held = {str(c).lower() for c in (e.get("columns") or [])}
-            if not set(q) & held:
+            if not set(tokens(phrase)) & held:
                 return 0.0
         b = self.boosts(phrase)
         s += b["flat"].get(e["id"], 0.0)
         alias_text = b["text"].get(e["id"])
         if alias_text:
+            alias_text = {stem(t) for t in alias_text}
             s += sum(self.idf(t) for t in q if t in alias_text)
         return s
 
