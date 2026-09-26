@@ -128,7 +128,8 @@ def _tab() -> dict | None:
 
 
 def search(args: dict) -> dict:
-    return _text(C.search_report(args["phrase"], R.Index(), args["k"]))
+    return _text(C.search_report(args["phrase"], R.Index(), args["k"],
+                                 "pick one and call celonis_open or celonis_read with its id"))
 
 
 def resolve(args: dict) -> dict:

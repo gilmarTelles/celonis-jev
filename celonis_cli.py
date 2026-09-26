@@ -478,13 +478,19 @@ def cmd_kpis(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
     return 0
 
 
-def search_report(phrase: str, index: R.Index, k: int = 10) -> dict:
-    """`R.search` with browser-ready urls when a tenant is configured."""
+CLI_NEXT = "pick one and run `celonis open --id <id>` or `celonis read --id <id>`"
+
+
+def search_report(phrase: str, index: R.Index, k: int, next_step: str) -> dict:
+    """`R.search` with browser-ready urls when a tenant is configured.
+
+    `next_step` names the follow-up in the caller's own terms (CLI commands or
+    MCP tools)."""
     candidates, warnings = R.search(phrase, index, k), []
     for c in candidates:
         c["url"], warnings = celonis_api.absolute_or_relative(c["url"])
     return {"candidates": candidates, "index_built": index.built,
-            "next": "pick one and call celonis_open or celonis_read with its id",
+            "next": next_step,
             "warnings": warnings}
 
 
@@ -502,7 +508,7 @@ def navigate(url: str) -> bool:
 
 def cmd_search(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
                pql: str | None) -> int:
-    report = search_report(phrase, index, int(cliargs.flag(opts, "--limit") or 10))
+    report = search_report(phrase, index, int(cliargs.flag(opts, "--limit") or 10), CLI_NEXT)
     if "--json" in flags:
         print(json.dumps(report, indent=1))
         return 0 if report["candidates"] else 2
@@ -559,11 +565,14 @@ def cmd_ask(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
     if cmd == "ask" and hit.confirm and "--force" not in flags:
         print(f'  ambiguous (top {hit.confidence}, margin {hit.margin}) - '
               "which one?")
-        for cand in [{"name": hit.name, "kind": hit.kind, "url": hit.url}] + hit.alternatives:
+        top = {"id": hit.ref, "name": hit.name, "kind": hit.kind, "url": hit.url}
+        for cand in [top] + hit.alternatives:
             print(f'    {cand.get("prob", hit.confidence):.2f}  [{cand.get("kind")}] '
                   f'{cand["name"]}')
-            print(f'          {celonis_api.base()}{cand["url"]}')
-        print("  reopen with the clearer phrase, or --force to take the top one")
+            print(f'          id {cand["id"]}')
+            print(f'          {celonis_api.absolute_or_relative(cand["url"])[0]}')
+        print("  open one with: celonis open --id <id>, or reopen with a clearer phrase "
+              "(--force takes the top one)")
         return 3
     if cmd in ("open", "ask") and hit.url:
         full = celonis_api.absolute(hit.url)

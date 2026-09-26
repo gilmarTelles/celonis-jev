@@ -5,7 +5,7 @@
 ## Sub-features
 
 - `ask-link` prints the absolute tenant link when no CDP browser is running.
-- `ask-confirm` refuses to open an ambiguous pick, lists candidates with URLs, and exits `3`.
+- `ask-confirm` refuses to open an ambiguous pick, lists candidates with ids and URLs, and exits `3`.
 - `ask-open` navigates the tenant tab on `127.0.0.1:9222`.
 - `ask-learn` writes an accepted `ranked` phrase to `cache/aliases-learned.json`. `--no-learn` suppresses this.
 - `read-kpi` runs a KPI's PQL and prints columns and rows.
@@ -29,7 +29,7 @@ Preconditions:
 - `ask-open`, `ask-learn`, and `read-kpi` need `browser   yes` from `$V doctor`, meaning a Chrome window on `:9222` that the user signed in to the tenant. Otherwise report them as skipped.
 
 - **Link without a browser.** Ask for a clear KPI with no browser. Run `$V cli ask-link -- ask --no-learn "show the KPI for order cycle time"`. Exit `0`, stdout shows `[kpi] ...` and `no browser to open; link: https://<tenant>/...`.
-- **Confirm gate.** Ask a loose phrase. Run `$V cli ask-confirm -- ask --no-learn "open the operations dashboard"`. Exit `3`, stdout reads `ambiguous (top ...)`, lists each candidate with a full URL, and contains no `opened:` line.
+- **Confirm gate.** Ask a loose phrase. Run `$V cli ask-confirm -- ask --no-learn "open the operations dashboard"`. Exit `3`, stdout reads `ambiguous (top ...)`, lists each candidate with an `id` line and a full URL, ends with `open one with: celonis open --id <id>, or reopen with a clearer phrase`, and contains no `opened:` line. `open --id` with one of those ids opens it.
 - **Open in Chrome.** With a signed-in tab, run `$V cli ask-open -- ask --no-learn "show the KPI for order cycle time"`. Exit `0`, stdout reads `opened: https://...`, and `python3 celonis_cli.py tabs` lists that URL.
 - **Learn a phrase.** With a signed-in tab, pick a phrase whose `resolve --json` shows `path: "ranked"` and `confirm: false`, then run `$V cli ask-learn -- ask "<that phrase>"`. Stdout reads `learned: ...`, `.state` reads `VOCABULARY CHANGED`, and `$V cli ask-learn-after -- aliases` lists the phrase as `learned`. `$V cleanup` restores the file.
 - **Read a KPI.** With a signed-in tab, run `$V cli read-kpi -- read "show the KPI for order cycle time"`. Exit `0`, and stdout shows `PQL`, `cols`, at least one row, and a `query ...ms` line.
