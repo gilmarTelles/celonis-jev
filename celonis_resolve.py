@@ -130,6 +130,15 @@ def in_container(entry: dict, ids: list[str] | tuple[str, ...]) -> bool:
                      entry.get("packageId")) for c in ids)
 
 
+def ref(entry: dict) -> str:
+    """The handle a caller passes back to open or read one entry.
+
+    A KPI's id is its key inside a knowledge model, so package copies repeat it;
+    the model id makes it unique. Every other kind's id already is.
+    """
+    return f"{entry['model']}/{entry['id']}" if entry["kind"] == "kpi" else entry["id"]
+
+
 def phrase_key(phrase: str) -> str:
     return " ".join(tokens(phrase))
 
@@ -243,6 +252,7 @@ class Index:
         self.entries = blob["entries"]
         self.built = blob.get("built", "unknown")
         self.by_id = {e["id"]: e for e in self.entries}
+        self.by_ref = {ref(e): e for e in self.entries}
         self.vocab = vocab if vocab is not None else Vocab()
         self.columns = columns if columns is not None else Columns()
         self.df: dict[str, int] = {}
@@ -339,6 +349,51 @@ class Index:
                 for m in ms if m.get("packageId") == (a["container"] or {}).get("id")]
         picked = {id(m) for m in said}
         return said + [m for m in ms if id(m) not in picked]
+
+
+def entry_for(handle: str, index: Index) -> dict:
+    """The index entry a search candidate's `id` names."""
+    entry = index.by_ref.get(handle)
+    if entry is None:
+        raise LookupError(f"unknown id {handle!r}; search first (celonis_search, or "
+                          f"`celonis search`) and pass a candidate's id")
+    return entry
+
+
+def search(phrase: str, index: Index, k: int = 10) -> list[dict]:
+    """Candidates for a phrase, one per (kind, name), with the handle to open each.
+
+    Local and pure: no Jev, no tenant call. Package copies of one thing collapse
+    into their best-ranked representative, and `instances` says how many there
+    are. A deterministic answer (alias, spelled-out name, named column) leads,
+    marked `exact`. The collapse lives here only: inside the Jev shortlist it
+    changes which answers get flagged for confirmation.
+    """
+    out: list[dict] = []
+    groups: dict[tuple[str, str], dict] = {}
+
+    def add(score: float, e: dict, instances: int, **extra) -> None:
+        out.append({"id": ref(e), "name": e["name"], "kind": e["kind"],
+                    "container": _trail_entry(e)["container"], "url": e["url"],
+                    "score": round(score, 2), "instances": instances, **extra})
+        groups[(e["kind"], e["name"])] = out[-1]
+
+    quick = decide(phrase, index)
+    if quick:
+        entry, why = quick
+        pinned = same_thing_in_container(phrase, entry, index)
+        entry = pinned[0] if pinned else entry
+        # Counted by the walk below, which sees its copies (itself included) by score.
+        add(index.score(phrase, entry), entry, 0, exact=True, why=path_for(why))
+    for score, e in index.top_scored(phrase, k=len(index.entries)):
+        group = groups.get((e["kind"], e["name"]))
+        if group is not None:
+            group["instances"] += 1
+        elif len(out) < k:
+            add(score, e, 1)
+    if quick:
+        out[0]["instances"] = max(1, out[0]["instances"])
+    return out
 
 
 class LookupUnavailable(RuntimeError):
@@ -556,7 +611,7 @@ def _place(out: Resolution, entry: dict) -> None:
     """Copy the addressable fields of an index entry into a result."""
     out.name, out.kind, out.key = entry["name"], entry["kind"], entry.get("key")
     out.package, out.pool = entry.get("package"), entry.get("pool")
-    out.url, out.entity_id = entry["url"], entry.get("id")
+    out.url, out.entity_id, out.ref = entry["url"], entry.get("id"), ref(entry)
 
 
 def answer_from_entry(phrase: str, entry: dict, path: str, started: float, index: "Index",
@@ -800,7 +855,6 @@ def decide_match(phrase: str, answers: dict, short: list[dict], index: "Index") 
 def resolve(phrase: str, client: jev.Jev | None = None, index: Index | None = None,
             verbose: bool = True, trace: "Trail | None" = None) -> Resolution:
     trace = trace or NO_TRACE
-    client = client or jev.Jev()
     index = index or Index()
     started = time.perf_counter()
     trace.begin(phrase, index)
@@ -848,6 +902,7 @@ def resolve(phrase: str, client: jev.Jev | None = None, index: Index | None = No
         trace.result(out)
         return out
 
+    client = client or jev.Jev()      # only now: every path above needs no key
     state, prompt = state_for(phrase, short), questions(short, phrase)
     answers, usage, secs, cached = client.ask(state, prompt)
     tokens_used, calls = usage["input_tokens"], 1
@@ -933,7 +988,7 @@ def resolve(phrase: str, client: jev.Jev | None = None, index: Index | None = No
                    else f"match confidence >= {T.MATCH}")
 
     result.alternatives = [
-        {"name": e["name"], "kind": e["kind"], "prob": round(p, 2), "url": e["url"]}
+        {"id": ref(e), "name": e["name"], "kind": e["kind"], "prob": round(p, 2), "url": e["url"]}
         for k, p, e in m.ranked
         if k != m.hit_slot and e["id"] != (chosen or {}).get("id")][:3]
     trace.result(result)
