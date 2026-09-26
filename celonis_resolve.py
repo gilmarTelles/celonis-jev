@@ -48,6 +48,7 @@ COLUMNS = Path(__file__).with_name("celonis-columns.json")
 SHORTLIST = 10        # the first prompt: candidates are what a judgment costs
 SHORTLIST_FULL = 30   # re-asked only when the first pass refuses or is not sure
 MAX_COPIES = 10       # other instances a search candidate lists
+PHRASE_MEMO = 1024    # per-phrase boosts an Index keeps before starting over
 RRF_K = 60            # reciprocal-rank fusion constant (the usual 60)
 
 
@@ -91,15 +92,16 @@ _VOWEL = re.compile(r"[aeiouy]")
 def stem(w: str) -> str:
     """A light English suffix strip, so 'postings', 'posting' and 'Posting' score as one word.
 
-    Ranking only: literal matching (decide, kinds, containers) keeps the words as said.
+    Plurals: 'entries' -> 'entry', 'boxes' -> 'box', 'cases' -> 'case', 'kpis' -> 'kpi';
+    'process', 'status', 'analysis' and 'business' are not plurals and stay whole.
     """
     if len(w) <= 3 or not w.isalpha():
         return w
     if w.endswith("ies") and len(w) > 4:
         w = w[:-3] + "y"
-    elif w.endswith("es") and w[-3] in "sxz" or w.endswith(("ches", "shes")):
+    elif w.endswith(("sses", "xes", "zes", "ches", "shes")):
         w = w[:-2]
-    elif w.endswith("s") and not w.endswith(("ss", "us", "is")):
+    elif w.endswith("s") and not w.endswith(("ss", "us")) and not (w.endswith("is") and len(w) >= 5):
         w = w[:-1]
     for suf in ("ing", "ed", "ly"):
         base = w[:-len(suf)]
@@ -109,9 +111,20 @@ def stem(w: str) -> str:
     return w[:-1] if len(w) > 4 and w.endswith("e") else w
 
 
+RANK_STOP = frozenset(STOP | {stem(w) for w in STOP})
+
+
 @lru_cache(maxsize=1 << 16)
 def stems(s: str) -> tuple[str, ...]:
-    return tuple(stem(t) for t in tokens(s))
+    """The ranking normaliser: every word stemmed, then stopwords dropped.
+
+    Stopwords go after stemming so 'showing' and 'shows' do not come back as
+    'show'. Ranking only: literal matching (decide, kinds, containers) uses
+    `tokens()`, the words as said.
+    """
+    s = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", s or "")
+    return tuple(t for w in re.findall(r"[a-z0-9]+", s.lower())
+                 if len(t := stem(w)) > 1 and t not in RANK_STOP)
 
 
 # The words people use for a kind, longest phrase first. Container words (pool,
@@ -148,6 +161,10 @@ KINDS = tuple((tuple(_sing(t) for t in w.split()), k) for w, k in KIND_WORDS)
 
 
 # Generic finance / SAP / process-mining synonyms and abbreviations (EN + PT); not tenant data.
+# A group fires on a distinctive or multi-word member. Words that appear in half
+# the asks (order, item, open, total, value, view, model, table, user, close,
+# update, pool, kpi, report, board, data) are not members: they would fire their
+# group on almost everything.
 DOMAIN_SYNONYMS = (
     ("general ledger", "gl", "ledger", "journal", "razao", "contabil"),
     ("journal entry", "je", "posting", "lancamento", "accounting document"),
@@ -158,7 +175,7 @@ DOMAIN_SYNONYMS = (
     ("invoice", "bill", "fatura", "nota fiscal", "nf", "billing"),
     ("purchase order", "po", "pedido compra", "ebeln"),
     ("purchase requisition", "pr", "requisition", "requisicao", "banfn"),
-    ("sales order", "so", "order", "pedido venda", "vbeln"),
+    ("sales order", "so", "pedido venda", "vbeln"),
     ("goods receipt", "gr", "receipt", "recebimento", "migo"),
     ("goods issue", "gi", "delivery", "shipment", "remessa", "entrega"),
     ("payment", "remittance", "pagamento", "paid", "settlement", "disbursement"),
@@ -170,12 +187,12 @@ DOMAIN_SYNONYMS = (
     ("due date", "vencimento", "maturity", "net due"),
     ("discount", "desconto", "cash discount", "early payment"),
     ("payment terms", "terms", "condicao pagamento", "zterm"),
-    ("dashboard", "view", "board", "painel", "report", "relatorio"),
-    ("kpi", "metric", "indicator", "measure", "indicador", "kpis"),
+    ("dashboard", "painel", "relatorio"),
+    ("metric", "indicator", "measure", "indicador"),
     ("cycle time", "throughput time", "lead time", "duration", "tempo ciclo"),
     ("rework", "retrabalho", "repetition", "loop"),
     ("automation rate", "automation", "touchless", "no touch", "automacao"),
-    ("manual", "user", "human", "manually"),
+    ("manual", "human", "manually"),
     ("variant", "path", "variante"),
     ("activity", "event", "step", "atividade", "evento"),
     ("case", "process instance", "caso"),
@@ -183,20 +200,20 @@ DOMAIN_SYNONYMS = (
     ("maverick", "off contract", "non compliant"),
     ("company code", "bukrs", "entity", "empresa", "legal entity"),
     ("plant", "werks", "site", "planta", "centro"),
-    ("material", "product", "item", "sku", "matnr", "produto"),
+    ("material", "product", "sku", "matnr", "produto"),
     ("inventory", "stock", "estoque", "warehouse"),
     ("cost center", "kostl", "centro custo"),
     ("profit center", "prctr", "centro lucro"),
     ("tax", "vat", "imposto", "tributo", "icms", "withholding"),
     ("credit memo", "credit note", "nota credito"),
     ("debit memo", "debit note", "nota debito"),
-    ("amount", "value", "valor", "net value", "total"),
+    ("amount", "valor", "net value"),
     ("currency", "moeda", "waers"),
     ("revenue", "sales", "receita", "vendas", "faturamento", "turnover"),
     ("expense", "cost", "custo", "despesa", "spend", "spending"),
     ("procurement", "purchasing", "p2p", "purchase to pay", "compras", "sourcing"),
     ("order to cash", "o2c", "otc"),
-    ("record to report", "r2r", "closing", "close", "fechamento"),
+    ("record to report", "r2r", "fechamento"),
     ("month end", "period end", "period close"),
     ("accrual", "provisao", "provision"),
     ("reconciliation", "recon", "conciliacao", "matching", "match"),
@@ -207,34 +224,31 @@ DOMAIN_SYNONYMS = (
     ("duplicate", "duplicated", "duplicidade", "double"),
     ("fiscal year", "fy", "gjahr", "exercicio"),
     ("period", "month", "periodo", "mes"),
-    ("user", "usuario", "resource"),
+    ("usuario", "resource"),
     ("master data", "cadastro", "mdm"),
-    ("change", "update", "alteracao", "modification", "modified"),
+    ("change", "alteracao", "modification", "modified"),
     ("cancel", "cancellation", "reversal", "storno", "estorno", "reversed"),
     ("dunning", "collection", "cobranca", "reminder"),
     ("working capital", "wc", "capital giro"),
     ("on time", "otd", "punctual", "pontual"),
-    ("backlog", "open", "pending", "aberto", "pendente", "outstanding"),
-    ("data model", "knowledge model", "semantic model", "model"),
-    ("data pool", "pool", "data source"),
-    ("table", "tabela", "dataset"),
+    ("backlog", "pending", "aberto", "pendente", "outstanding"),
+    ("data model", "knowledge model", "semantic model"),
+    ("data pool", "data source"),
+    ("tabela", "dataset"),
     ("action flow", "automation flow", "skill"),
 )
 
 SYNONYM_WEIGHT = 0.5    # an expanded word counts half what the ask's own word counts
-SYNONYM_GROUPS = tuple(tuple(tuple(_sing(t) for t in tokens(m)) for m in g) for g in DOMAIN_SYNONYMS)
+SYNONYM_GROUPS = tuple(tuple(m for m in map(stems, g) if m) for g in DOMAIN_SYNONYMS)
 
 
-def expansions(q: list[str]) -> tuple[set[str], int]:
-    """Words the domain table adds to the ask (singular), and how many groups fired."""
-    qs = tuple(_sing(t) for t in q)
+def expansions(q: tuple[str, ...]) -> set[str]:
+    """Ranking terms the domain table adds to the ask's own (`stems`) terms."""
     out: set[str] = set()
-    fired = 0
     for g in SYNONYM_GROUPS:
-        if any(_contains(qs, m) for m in g):
-            fired += 1
+        if any(_contains(q, m) for m in g):
             out.update(t for m in g for t in m)
-    return out - set(qs), fired
+    return out - set(q)
 
 
 def implied_kind(phrase: str) -> str | None:
@@ -386,7 +400,6 @@ class Index:
         self.n = max(1, len(self.entries))
         self._boosts: dict[str, dict] = {}
         self._semantic: "celonis_embed.Embeddings | None" = None
-        self._syn: dict[str, set[str]] = {}
 
     @property
     def semantic(self) -> "celonis_embed.Embeddings":
@@ -395,21 +408,20 @@ class Index:
             self._semantic = celonis_embed.Embeddings(self.entries)
         return self._semantic
 
-    def _expanded(self, phrase: str) -> set[str]:
-        if phrase not in self._syn:
-            self._syn[phrase] = {stem(t) for t in expansions(tokens(phrase))[0]} - set(stems(phrase))
-        return self._syn[phrase]
-
     def idf(self, t: str) -> float:
         return math.log(1 + self.n / (1 + self.df.get(t, 0)))
 
     def boosts(self, phrase: str) -> dict:
-        """What the ask already tells us, per entry id: alias text, containers, kind.
+        """What the ask already tells us, per entry id: alias text, containers, kind,
+        and the synonym terms it adds.
 
-        Computed once per phrase, from the index and the vocabulary - no model.
+        Computed once per phrase (the last PHRASE_MEMO phrases), from the index
+        and the vocabulary - no model.
         """
         if phrase in self._boosts:
             return self._boosts[phrase]
+        if len(self._boosts) >= PHRASE_MEMO:
+            self._boosts.clear()
         text: dict[str, set[str]] = {}
         flat: dict[str, float] = {}
         said: list[str] = []                     # containers the vocabulary names: facts
@@ -429,7 +441,8 @@ class Index:
                 b += KIND_HIT
             if b:
                 flat[e["id"]] = flat.get(e["id"], 0.0) + b
-        self._boosts[phrase] = {"text": text, "flat": flat, "said": said}
+        self._boosts[phrase] = {"text": text, "flat": flat, "said": said,
+                                "syn": expansions(stems(phrase))}
         return self._boosts[phrase]
 
     def score(self, phrase: str, e: dict) -> float:
@@ -439,7 +452,8 @@ class Index:
         name = set(stems(e["name"]) + stems(e.get("key", "")))
         ctx = set(stems(f'{e.get("package","")} {e.get("space","")} {e.get("pool","")}'))
         s = sum(self.idf(t) * (2.0 if t in name else 0.5 if t in ctx else 0.0) for t in q)
-        extra = self._expanded(phrase)
+        b = self.boosts(phrase)
+        extra = b["syn"]
         if extra:
             s += SYNONYM_WEIGHT * sum(self.idf(t) * (2.0 if t in name else 0.5 if t in ctx else 0.0)
                                       for t in extra)
@@ -451,12 +465,11 @@ class Index:
             held = {str(c).lower() for c in (e.get("columns") or [])}
             if not set(tokens(phrase)) & held:
                 return 0.0
-        b = self.boosts(phrase)
         s += b["flat"].get(e["id"], 0.0)
         alias_text = b["text"].get(e["id"])
         if alias_text:
-            alias_text = {stem(t) for t in alias_text}
-            s += sum(self.idf(t) for t in q if t in alias_text)
+            alias_terms = {stem(t) for t in alias_text}
+            s += sum(self.idf(t) for t in q if t in alias_terms)
         return s
 
     def top_scored(self, phrase: str, k: int = SHORTLIST) -> list[tuple[float, dict]]:
