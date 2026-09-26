@@ -72,6 +72,26 @@ read-only surface over MCP. `python3 celonis_agent_setup.py --check` audits
 local wiring; the installer writes machine-specific configuration to ignored
 locations.
 
+## Evaluation
+
+```bash
+python3 celonis_eval.py --build-cases        # labels -> index ids; fails on a stale label
+python3 celonis_eval.py --live --baseline    # tenant + Jev; records, scores, keeps a baseline
+python3 celonis_eval.py --offline            # replay only: no credentials, no network
+python3 celonis_eval.py --only e001,e002
+```
+
+`celonis_eval.py` scores the resolver with and without Jev per bucket (exact,
+overlap, paraphrase), with recall@10/@30 of the BM25 shortlist, and prints the
+delta against `bench/eval-baseline.json`. The labelled set `celonis-eval.json`
+names tenant entities, so it is private and ignored: write it per tenant, with
+every acceptable (kind, name) pair per case, then rerun `--build-cases` after
+each index refresh. A `--live` run records the tenant name search into
+`bench/eval-cassette.json` and Jev answers into `cache/`; `--offline` replays
+both and reports a miss as an error on that case. Results land in
+`bench/eval-<mode>-<timestamp>.json`. The harness drives the resolver from
+outside; it never changes resolver behaviour.
+
 ## Verification
 
 There is no permanent test suite. Run the changed command or a focused smoke

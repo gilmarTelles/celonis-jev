@@ -341,16 +341,29 @@ class Index:
         return said + [m for m in ms if id(m) not in picked]
 
 
+class LookupUnavailable(RuntimeError):
+    """The tenant name search could not answer; the message names the failure type."""
+
+
 def named_lookup(phrase: str) -> list[dict]:
     """The tenant's own name search, used when the request includes a literal name."""
     try:
         r = requests.get(celonis_api.base() + "/package-manager/api/search",
-                         headers=celonis_api.headers(), timeout=20,
+                         headers=celonis_api.headers(), timeout=(3, 5),
                          params={"searchTerm": phrase, "draftMode": "false", "flavor": "STUDIO"})
         r.raise_for_status()
-        return r.json() if isinstance(r.json(), list) else r.json().get("results", [])
-    except Exception:
-        return []
+        got = r.json()
+        return got if isinstance(got, list) else got.get("results", [])
+    except Exception as e:
+        raise LookupUnavailable(type(e).__name__) from e
+
+
+def tenant_names(phrase: str) -> tuple[list[dict], list[str]]:
+    """The name search, or no hits and a warning: it only shortcuts what the index answers."""
+    try:
+        return named_lookup(phrase), []
+    except LookupUnavailable as e:
+        return [], [f"tenant name search unavailable ({e}); answered from the local index"]
 
 
 def containers_named(phrase: str, index: "Index") -> list[dict]:
@@ -805,19 +818,20 @@ def resolve(phrase: str, client: jev.Jev | None = None, index: Index | None = No
                   f'     {out.url}')
         return out
 
-    named = named_lookup(phrase)
+    named, warnings = tenant_names(phrase)
     trace.step("named_lookup", count=len(named),
                results=[{"name": n.get("name"),
                          "kind": n.get("assetType", n.get("type", "")),
-                         "url": n.get("url") or n.get("link")} for n in named[:8]])
-    if len(named) == 1 and named[0].get("name"):
-        out = Resolution(phrase=phrase, path="named_lookup", name=named[0]["name"],
-                         kind=named[0].get("assetType", named[0].get("type", "")),
-                         url=None, confidence=1.0, grounded=True,
-                         ms=(time.perf_counter() - started) * 1000)
+                         "url": n.get("url") or n.get("link")} for n in named[:8]],
+               error=warnings[0] if warnings else None)
+    # The search hit carries no url or kind; only its index entry can be opened.
+    entry = index.by_id.get(named[0].get("identifier") or "") if len(named) == 1 else None
+    if entry:
+        out = answer_from_entry(phrase, entry, "named_lookup", started, index, why="named lookup")
         trace.result(out)
         if verbose:
-            print(f'"{phrase}"\n  -> named lookup: {out.name} (no model call){named}')
+            print(f'"{phrase}"\n  -> named lookup: [{out.kind}] {out.name} (no model call)\n'
+                  f'     {out.url}')
         return out
 
     scored = index.top_scored(phrase)
@@ -827,7 +841,7 @@ def resolve(phrase: str, client: jev.Jev | None = None, index: Index | None = No
         # Nothing in the index shares a word with the ask. Columns and PQL are not
         # indexed, so the phrase may still name something real - `uses` searches those.
         out = Resolution(phrase=phrase, path="no_candidates", name=None, url=None,
-                         reason="no match",
+                         reason="no match", warnings=warnings,
                          hint=f"nothing in the index shares a word with that; "
                               f"celonis uses {phrase!r} searches PQL and object fields",
                          ms=(time.perf_counter() - started) * 1000)
@@ -878,7 +892,8 @@ def resolve(phrase: str, client: jev.Jev | None = None, index: Index | None = No
                         exists=round(m.exists, 2), p_none=round(m.p_none, 2),
                         confidence=round(m.conf, 2),
                         ms=(time.perf_counter() - started) * 1000, tokens=tokens_used,
-                        cost=tokens_used / 1e6 * jev.PRICE_IN, cached=cached)
+                        cost=tokens_used / 1e6 * jev.PRICE_IN, cached=cached,
+                        warnings=warnings)
     chosen: dict | None = m.entry
     if m.branch == "matched":
         result.confirm, result.margin = m.confirm, round(m.margin, 3)
@@ -950,20 +965,17 @@ def resolve_code_only(phrase: str, index: "Index") -> Resolution:
     if quick:
         entry, why = quick
         return answer_from_entry(phrase, entry, path_for(why), started, index, why)
-    named = named_lookup(phrase)
-    if named:
-        n = named[0]
-        return Resolution(phrase=phrase, path="named_lookup", name=n.get("name"),
-                          kind=n.get("assetType", n.get("type", "")),
-                          url=n.get("url") or n.get("link") or "", intent="open",
-                          confidence=1.0,
-                          ms=(time.perf_counter() - started) * 1000)
+    named, warnings = tenant_names(phrase)
+    entry = next(filter(None, (index.by_id.get(n.get("identifier") or "") for n in named)), None)
+    if entry:
+        return answer_from_entry(phrase, entry, "named_lookup", started, index, why="named lookup")
     short = index.top(phrase, k=1)
     e = short[0] if short else None
-    return Resolution(phrase=phrase, path="bm25_top1",
-                      name=e["name"] if e else None, kind=e["kind"] if e else None,
-                      url=e["url"] if e else "", confidence=0.0,
-                      ms=(time.perf_counter() - started) * 1000)
+    out = Resolution(phrase=phrase, path="bm25_top1", url="", confidence=0.0, warnings=warnings)
+    if e:
+        _place(out, e)
+    out.ms = (time.perf_counter() - started) * 1000
+    return out
 
 
 DEMO = [
@@ -1006,4 +1018,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except jev.JevError as e:
+        raise SystemExit(str(e))

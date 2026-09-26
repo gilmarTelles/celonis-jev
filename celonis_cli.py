@@ -43,6 +43,7 @@ import celonis_api
 import celonis_pql as P
 import celonis_resolve as R
 import cliargs
+import jev
 
 ENV = "develop"
 ALIASES = Path(__file__).with_name("celonis-aliases.json")
@@ -480,6 +481,9 @@ def cmd_ask(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
         hit = R.resolve(phrase, index=index, verbose=(cmd == "resolve" and "--json" not in flags))
         if "--json" in flags:
             print(json.dumps({k: v for k, v in hit.to_dict().items() if k != "cached"}, indent=1))
+        else:
+            for w in hit.warnings:
+                print(f"  ! {w}")
         if cmd == "ask" and hit.name:
             print(f'  [{hit.kind}] {hit.name}  (p={hit.confidence}'
                   f'{"  confirm first" if hit.confirm else ""})')
@@ -521,6 +525,8 @@ def cmd_read(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
     if pql is None:
         hit = (R.resolve(phrase, index=index, verbose=False) if use_jev
                else R.resolve_code_only(phrase, index))
+        for w in hit.warnings:
+            print(f"  ! {w}")
         if not hit.name:
             print(f'no match for "{phrase}"')
             return 2
@@ -589,7 +595,11 @@ def main() -> int:
         print(__doc__)
         return 1
     pql = next((a for a in rest if a.startswith("TABLE(") or a.startswith("SUM(")), None)
-    return run(cmd, phrase, index, opts, flags, pql)
+    try:
+        return run(cmd, phrase, index, opts, flags, pql)
+    except jev.JevError as e:
+        print(e, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

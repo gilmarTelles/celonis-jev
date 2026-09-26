@@ -83,6 +83,7 @@ repository configuration.
 ```bash
 python3 -m compileall -q .
 python3 celonis_cli.py doctor
+python3 celonis_eval.py --offline    # resolver accuracy from a recorded run; see AGENTS.md
 ```
 
 Do not add tenant exports, screenshots, benchmark captures, credentials, or

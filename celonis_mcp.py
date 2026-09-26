@@ -78,18 +78,20 @@ def call(name: str, args: dict) -> dict:
                           "confidence": hit.confidence, "confirm": hit.confirm,
                           "intent": hit.intent,
                           "alternatives": hit.alternatives[:3],
-                          "next": ("open_url" if hit.name else "not_found")})
+                          "next": ("open_url" if hit.name else "not_found"),
+                          "warnings": hit.warnings})
         if name == "celonis_open":
             index = R.Index()
             hit = R.resolve(args["phrase"], index=index, verbose=False)
             if not hit.name:
                 return _text({"opened": False, "reason": hit.reason or "no match",
-                              "alternatives": hit.alternatives[:3]}, is_error=True)
+                              "alternatives": hit.alternatives[:3],
+                              "warnings": hit.warnings}, is_error=True)
             if hit.confirm:
                 return _text({"opened": False, "ambiguous": True,
                               "candidates": [{"name": hit.name, "url": api.absolute(hit.url),
                                               "confidence": hit.confidence}] + hit.alternatives[:3],
-                              "next": "ask the user which one"})
+                              "next": "ask the user which one", "warnings": hit.warnings})
             url = api.absolute(hit.url)
             opened = False
             try:
@@ -100,7 +102,8 @@ def call(name: str, args: dict) -> dict:
                 pass
             return _text({"opened": opened, "url": url, "name": hit.name,
                           "kind": hit.kind, "confidence": hit.confidence,
-                          "note": "" if opened else "no CDP browser; give the URL to the user"})
+                          "note": "" if opened else "no CDP browser; give the URL to the user",
+                          "warnings": hit.warnings})
         if name == "celonis_read":
             index = R.Index()
             if args.get("pql"):
@@ -127,7 +130,8 @@ def call(name: str, args: dict) -> dict:
                 return _text({"answered": False, "pql": pql, "error": out["error"][:300]}, is_error=True)
             return _text({"answered": True, "pql": P.pql_table(pql),
                           "columns": out["columns"], "rows": out["rows"][:20],
-                          "query_ms": out["ms"]})
+                          "query_ms": out["ms"],
+                          "warnings": hit.warnings if not args.get("pql") else []})
         if name == "celonis_doctor":
             lines = C.doctor(report=False)
             return _text("\n".join(lines), is_error=any(l.startswith("FAIL") for l in lines))

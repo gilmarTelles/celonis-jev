@@ -62,7 +62,7 @@ def client():
         if "client" not in _state:
             try:
                 _state["client"] = jev.Jev()
-            except SystemExit as e:              # no key: the judgment cannot run
+            except jev.JevError as e:            # no key: the judgment cannot run
                 _state["client"] = NoJev(str(e))
         return _state["client"]
 
@@ -108,7 +108,7 @@ def status() -> dict:
     idx = index()
     try:
         key = bool(jev.api_key())
-    except SystemExit:
+    except jev.JevError:
         key = False
     try:
         tabs = [t["url"] for t in cdp.targets()]
