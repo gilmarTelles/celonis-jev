@@ -105,13 +105,25 @@ is what lets a paraphrase find an item whose name shares none of its words.
 
 ```bash
 ollama pull mxbai-embed-large     # once; Ollama must be running
-python3 celonis_cli.py search "the view showing how old open items are"
+python3 celonis_index.py --embed  # embed the index (about 4 minutes for 3,500 entries)
+python3 celonis_cli.py search "which suppliers get paid late"
 ```
 
-The first search after an index rebuild embeds every entry once (about 8 minutes
-on a laptop, cached under `cache/`); later searches add about 0.15 s. Without
-Ollama, search is BM25 only and says so once on stderr. `CELONIS_EMBED_URL`
-(`off` disables it) and `CELONIS_EMBED_MODEL` override the defaults.
+Search never embeds the index. `celonis_index.py --embed` does, into
+`cache/embeddings-<model>.json` (one file per model, vectors keyed by entry
+text), checkpointing after every batch, so an interrupted run resumes and a
+rerun embeds only new entries. A normal `celonis_index.py` refresh runs the same
+step when Ollama answers and skips it silently otherwise. Search ranks the
+entries that have a vector and leaves the rest to BM25; semantic ranking adds
+about 0.15 s a search.
+
+Without Ollama, or with no embeddings yet, search is BM25 only and the search
+report's `warnings` says so. A query embed that fails or takes over 5 s pauses
+semantic ranking for 5 minutes in that process (one stderr warning), so a stuck
+server costs one slow search. Candidates come in `rank` order; `score` is the
+BM25 score, 0 for a match only the embedding found. `CELONIS_EMBED_URL` (`off`
+disables it) and `CELONIS_EMBED_MODEL` override the defaults. The eval takes
+`--semantic auto|on|off` and prints the mode it ran with (`semantic=on|off`).
 
 ## Evaluation
 
@@ -122,6 +134,7 @@ python3 celonis_eval.py --offline            # replay only: no credentials, no n
 python3 celonis_eval.py --only e001,e002
 python3 celonis_eval.py --live --judges code,jev,agent   # add the calling agent as a judge
 python3 celonis_eval.py --recall-only      # BM25 and search recall@k only; no judges, no network, seconds
+python3 celonis_eval.py --recall-only --semantic off   # the same without the embedding model
 python3 celonis_eval.py --cases other.json --build-cases   # any mode on another labelled file
 ```
 
