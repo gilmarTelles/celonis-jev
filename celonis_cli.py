@@ -491,9 +491,14 @@ def search_report(phrase: str, index: R.Index, k: int, next_step: str) -> dict:
         c["url"], warnings = celonis_api.absolute_or_relative(c["url"])
     if index.semantic.warning:
         warnings = warnings + [index.semantic.warning]
-    return {"candidates": candidates, "index_built": index.built,
-            "next": next_step,
-            "warnings": warnings}
+    report = {"candidates": candidates, "index_built": index.built,
+              "next": next_step,
+              "warnings": warnings}
+    if not candidates:
+        report["reason"] = (f"nothing in the index shares a word with {phrase!r}" if R.stems(phrase)
+                            else f"{phrase!r} has no words to search for "
+                                 f"(stopwords such as 'the' and 'show me' are ignored)")
+    return report
 
 
 def navigate(url: str) -> bool:
@@ -527,7 +532,7 @@ def cmd_search(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
                   f"{f' (+{more} more)' if more else ''}")
         print(f"          {c['url']}")
     if not report["candidates"]:
-        print(f"  nothing in the index shares a word with {phrase!r}")
+        print(f"  {report['reason']}")
     return 0 if report["candidates"] else 2
 
 
