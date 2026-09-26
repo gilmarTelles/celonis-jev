@@ -521,7 +521,8 @@ def ranked(phrase: str, index: Index) -> list[tuple[float, dict]]:
 
     Reciprocal-rank fusion: each list contributes 1/(RRF_K + rank), so an entry
     both rankings like leads, and one only the embedding finds (a paraphrase, no
-    shared word) can still enter. The score carried is BM25's (0 when only the
+    shared word) can still enter. As in `top_scored`, a container the ask named
+    leads the fused order. The score carried is BM25's (0 when only the
     embedding found it). With no model this is `top_scored` unchanged.
     """
     bm = index.top_scored(phrase, k=len(index.entries))
@@ -530,12 +531,16 @@ def ranked(phrase: str, index: Index) -> list[tuple[float, dict]]:
         return bm
     fused: dict[int, float] = {}
     bm_score = {id(e): s for s, e in bm}
-    by_id = {id(e): e for _, e in sem}
+    by_id = {id(e): e for _, e in sem} | {id(e): e for _, e in bm}
     for ranking in (bm, sem):
         for r, (_, e) in enumerate(ranking, 1):
             fused[id(e)] = fused.get(id(e), 0.0) + 1.0 / (RRF_K + r)
-    order = sorted(fused, key=lambda i: -fused[i])
-    return [(bm_score.get(i, 0.0), by_id[i]) for i in order]
+    order = [(bm_score.get(i, 0.0), by_id[i]) for i in sorted(fused, key=lambda i: -fused[i])]
+    said = index.boosts(phrase)["said"]
+    if said:
+        order = ([x for x in order if in_container(x[1], said)]
+                 + [x for x in order if not in_container(x[1], said)])
+    return order
 
 
 def search(phrase: str, index: Index, k: int = 10) -> list[dict]:
@@ -550,15 +555,23 @@ def search(phrase: str, index: Index, k: int = 10) -> list[dict]:
     all. A deterministic answer (alias, spelled-out name, named column) leads,
     marked `exact`. The collapse lives here only: inside the Jev shortlist it
     changes which answers get flagged for confirmation.
+
+    `rank` is the entry's position in `ranked()` (the fused order when semantic
+    ranking is on); `score` is its BM25 score, 0 for an entry only the embedding
+    found, so candidates are ordered by rank, not score.
     """
     out: list[dict] = []
     groups: dict[tuple[str, str], dict] = {}
     shown: set[int] = set()
 
+    order = ranked(phrase, index)
+    rank = {id(e): n for n, (_, e) in enumerate(order, 1)}
+
     def add(score: float, e: dict, **extra) -> None:
         out.append({"id": ref(e), "name": e["name"], "kind": e["kind"],
                     "container": _trail_entry(e)["container"], "url": e["url"],
-                    "score": round(score, 2), "instances": 1, "copies": [], **extra})
+                    "rank": rank.get(id(e)), "score": round(score, 2), "instances": 1,
+                    "copies": [], **extra})
         groups[(e["kind"], e["name"])] = out[-1]
         shown.add(id(e))
 
@@ -568,7 +581,7 @@ def search(phrase: str, index: Index, k: int = 10) -> list[dict]:
         pinned = same_thing_in_container(phrase, entry, index)
         entry = pinned[0] if pinned else entry
         add(index.score(phrase, entry), entry, exact=True, why=path_for(why))
-    for score, e in ranked(phrase, index):
+    for score, e in order:
         if id(e) in shown:
             continue
         group = groups.get((e["kind"], e["name"]))

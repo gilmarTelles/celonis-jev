@@ -40,7 +40,10 @@ TOOLS = [
         "description": ("Find Celonis assets, KPIs, objects, tables and pages matching a phrase. "
                         "Returns ranked candidates with ids, one per kind and name; copies lists "
                         "other instances, so pick the one in the right container. Local index only: "
-                        "no Jev key, tenant or browser needed. Then pass an id to celonis_open "
+                        "no Jev key, tenant or browser needed. Candidates come in rank order "
+                        "(BM25 fused with a local embedding model when one runs); score is the "
+                        "BM25 score and is 0 for a match only the embedding found. warnings "
+                        "says when semantic ranking is off. Then pass an id to celonis_open "
                         "or celonis_read."),
         "inputSchema": {"type": "object", "properties": {
             "phrase": {"type": "string", "description": "What to look for."},
