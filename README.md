@@ -30,14 +30,16 @@ python3 -m pip install -r requirements.txt
 python3 celonis_cli.py doctor
 python3 celonis_index.py
 
+python3 celonis_cli.py search "the dashboard for monthly credits"
+python3 celonis_cli.py open --id <an id from search>
 python3 celonis_cli.py resolve "the dashboard for monthly credits"
-python3 celonis_cli.py open "the dashboard for monthly credits"
 python3 celonis_cli.py view --no-open
-python3 celonis_cli.py doctor
 ```
 
-`resolve` needs no browser after the local index exists. `open` and `read` need
-a signed-in Chrome tab with remote debugging enabled. `celonis_index.py` refreshes
+`search` needs only the local index: no Jev key, no tenant, no browser.
+`resolve` needs no browser after the local index exists. `read` needs a
+signed-in Chrome tab with remote debugging enabled; `open` uses one when it
+exists and prints the link otherwise. `celonis_index.py` refreshes
 the ignored tenant snapshot from the configured APIs.
 
 ## Architecture
@@ -67,14 +69,22 @@ The core modules are:
 | `agent.py`, `page.py`, `dom.py`, `browser_nav.py` | generic browser navigation support |
 | `celonis_mcp.py` | the MCP server: the one agent interface |
 
-## Host integrations
+## Agents
+
+MCP is the one agent interface. `.mcp.json` starts `celonis_mcp.py`, which
+offers `celonis_search`, `celonis_open`, `celonis_read`, `celonis_resolve` and
+`celonis_doctor`. An agent searches, picks a candidate, then opens or reads it
+by id. Search and open by id work with no TypeSafe key; only `celonis_resolve`
+and a phrase passed to open or read reach Jev, and only when judgment is
+needed. Anything that can only run shell commands uses the same surface through
+the CLI (`search`, `open --id`, `read --id`).
 
 ```bash
 python3 celonis_agent_setup.py --check
 python3 celonis_agent_setup.py
 ```
 
-The installer wires the extension and MCP server using paths on the local
+The installer adds the MCP server to omp and Claude using paths on the local
 machine. The generated project MCP file is ignored; `.mcp.json` is the portable
 repository configuration.
 
