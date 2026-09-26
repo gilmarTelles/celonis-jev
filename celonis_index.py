@@ -299,11 +299,10 @@ def add_columns(doc: dict, snap: dict) -> int:
 def main() -> None:
     _, opts = cliargs.parse_argv(sys.argv[1:])
     if "--describe" in opts:
-        celonis_describe.describe(json.loads(OUT.read_text()))
+        celonis_describe.describe(json.loads(OUT.read_text())["entries"])
         return
     if "--embed" in opts:
-        doc = json.loads(OUT.read_text())
-        celonis_embed.embed_index(doc["entries"], doc["built"])
+        celonis_embed.embed_index(json.loads(OUT.read_text())["entries"])
         return
     doc = build()
     snap = columns_snapshot()
@@ -320,7 +319,7 @@ def main() -> None:
             print(f"  {k:<14} {v}")
         print(f"  {with_columns} tables carry columns -> {COLUMNS_OUT.name} "
               f"({COLUMNS_OUT.stat().st_size:,} bytes, scan {snap['built'] or 'unknown'})")
-    celonis_embed.embed_index(doc["entries"], doc["built"], required=False)
+    celonis_embed.embed_index(doc["entries"], required=False)
 
 
 if __name__ == "__main__":

@@ -34,7 +34,7 @@ from pathlib import Path
 
 import requests
 
-from celonis_describe import load_descriptions
+import celonis_describe
 
 URL = os.environ.get("CELONIS_EMBED_URL", "http://localhost:11434").rstrip("/")
 MODEL = os.environ.get("CELONIS_EMBED_MODEL", "mxbai-embed-large")
@@ -161,16 +161,27 @@ def _embed(texts: list[str], timeout: tuple[float, float]) -> list[array]:
 class Embeddings:
     """Semantic ranking over the cached vectors. `ok` is False until a query embed succeeds."""
 
-    def __init__(self, entries: list[dict], built: str = "") -> None:
+    def __init__(self, entries: list[dict]) -> None:
         self.entries = entries
-        self.built = built
         self.ok = False
         self.vectors: list[tuple[array, dict]] | None = None   # loaded on the first rank()
         self.dim = 0
 
     def _load(self) -> None:
-        stored, said = load_cache(), load_descriptions(self.built)
-        self.vectors = [(stored[t], e) for e in self.entries if (t := entry_text(e, said)) in stored]
+        """An entry whose described text has no vector yet ranks by its bare-text vector."""
+        stored = load_cache()
+        try:
+            said = celonis_describe.load_descriptions()
+        except celonis_describe.Unreadable as err:
+            print(f"! {err}; semantic search ranks names only", file=sys.stderr)
+            said = {}
+        self.vectors = []
+        for e in self.entries:
+            v = stored.get(entry_text(e, said))
+            if v is None and said:
+                v = stored.get(entry_text(e))
+            if v is not None:
+                self.vectors.append((v, e))
         self.dim = len(self.vectors[0][0]) if self.vectors else 0
 
     @property
@@ -239,7 +250,7 @@ def _save(path: Path, stored: dict[str, array], wanted: set[str]) -> None:
         raise
 
 
-def embed_index(entries: list[dict], built: str = "", required: bool = True) -> None:
+def embed_index(entries: list[dict], required: bool = True) -> None:
     """Embed every entry the cache lacks, checkpointing after each batch.
 
     Resumable and idempotent: a killed run keeps its finished batches, a rerun
@@ -258,14 +269,27 @@ def embed_index(entries: list[dict], built: str = "", required: bool = True) -> 
             raise SystemExit(f"no embedding server at {URL} ({type(err).__name__}); "
                              f"start Ollama and `ollama pull {MODEL}`")
         return
+    try:
+        said = celonis_describe.load_descriptions()
+    except celonis_describe.Unreadable as err:
+        if required:
+            raise SystemExit(str(err))
+        print(f"! {err}; embedding skipped so no vectors are pruned", file=sys.stderr)
+        return
     path = cache_path()
-    said = load_descriptions(built)
-    wanted = {entry_text(e, said) for e in entries}
-    stored = {t: v for t, v in load_cache().items() if t in wanted}
+    pairs = {(entry_text(e, said), entry_text(e)) for e in entries}   # (described, bare)
+    wanted = {t for t, _ in pairs}
+    usable = wanted | {b for _, b in pairs}
+    stored = {t: v for t, v in load_cache().items() if t in usable}
+
+    def keep() -> set[str]:
+        """The wanted texts, plus the bare text of any entry still waiting for its described vector."""
+        return wanted | {bare for t, bare in pairs if t not in stored}
+
     missing = sorted(wanted - set(stored))
     batches = math.ceil(len(missing) / BATCH)
-    print(f"embeddings: {len(stored)}/{len(wanted)} cached, {len(missing)} to embed with {MODEL} "
-          f"in {batches} batches -> {path.relative_to(path.parent.parent)}", file=sys.stderr)
+    print(f"embeddings: {len(wanted) - len(missing)}/{len(wanted)} cached, {len(missing)} to embed "
+          f"with {MODEL} in {batches} batches -> {path.relative_to(path.parent.parent)}", file=sys.stderr)
     started = time.perf_counter()
     for n, i in enumerate(range(0, len(missing), BATCH), 1):
         chunk = missing[i:i + BATCH]
@@ -281,10 +305,10 @@ def embed_index(entries: list[dict], built: str = "", required: bool = True) -> 
         if len({len(v) for v in stored.values()}) > 1:
             raise SystemExit(f"{MODEL} returned vectors of a different size than the cache; "
                              f"delete {path.name} and rerun")
-        _save(path, stored, wanted)
-        print(f"  batch {n}/{batches}: {len(stored)}/{len(wanted)} embedded "
+        _save(path, stored, keep())
+        print(f"  batch {n}/{batches}: {len(wanted & stored.keys())}/{len(wanted)} embedded "
               f"({time.perf_counter() - started:.0f} s)", file=sys.stderr)
     if not missing:
-        _save(path, stored, wanted)
+        _save(path, stored, keep())
     for old in _legacy_paths():
         old.unlink(missing_ok=True)

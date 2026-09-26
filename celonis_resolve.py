@@ -405,7 +405,7 @@ class Index:
     def semantic(self) -> "celonis_embed.Embeddings":
         """Semantic ranking over the cached entry vectors; never embeds the index itself."""
         if self._semantic is None:
-            self._semantic = celonis_embed.Embeddings(self.entries, self.built)
+            self._semantic = celonis_embed.Embeddings(self.entries)
         return self._semantic
 
     def idf(self, t: str) -> float:
