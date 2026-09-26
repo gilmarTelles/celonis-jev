@@ -489,6 +489,8 @@ def search_report(phrase: str, index: R.Index, k: int, next_step: str) -> dict:
     candidates, warnings = R.search(phrase, index, k), []
     for c in candidates:
         c["url"], warnings = celonis_api.absolute_or_relative(c["url"])
+    if index.semantic.warning:
+        warnings = warnings + [index.semantic.warning]
     return {"candidates": candidates, "index_built": index.built,
             "next": next_step,
             "warnings": warnings}
@@ -517,7 +519,7 @@ def cmd_search(cmd: str, phrase: str, index: R.Index, opts: dict, flags: set,
     for c in report["candidates"]:
         tag = f" exact ({c['why']})" if c.get("exact") else ""
         copies = f"  x{c['instances']}" if c["instances"] > 1 else ""
-        print(f"  {c['score']:>6.2f}  [{c['kind']}] {c['name']}{copies}{tag}")
+        print(f"  #{c['rank'] or '-':<4} bm25 {c['score']:>6.2f}  [{c['kind']}] {c['name']}{copies}{tag}")
         print(f"          id {c['id']}   {c['container']}")
         if c["copies"]:
             more = c["instances"] - 1 - len(c["copies"])

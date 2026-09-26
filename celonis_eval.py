@@ -26,6 +26,8 @@ Run:  python3 celonis_eval.py --build-cases        labels -> ids, fails on a sta
       python3 celonis_eval.py --live --baseline    record, score, keep as the baseline
       python3 celonis_eval.py --offline            replay and compare to the baseline
       python3 celonis_eval.py --only e001,e002
+      python3 celonis_eval.py --recall-only        BM25 and search recall only, in seconds
+      python3 celonis_eval.py --recall-only --semantic off   search without the embedding model
       python3 celonis_eval.py --live --judges code,jev,agent --fresh-agent
 """
 
@@ -42,6 +44,7 @@ import time
 from pathlib import Path
 
 import celonis_api
+import celonis_embed
 import celonis_resolve as R
 import jev
 
@@ -74,9 +77,9 @@ def _pair(kind: str, name: str) -> tuple[str, str]:
     return kind, name.strip().lower()
 
 
-def build_cases(index: R.Index) -> dict:
+def build_cases(index: R.Index, path: Path) -> dict:
     """Rewrite each case's expect_ids from its expect pairs. Fails on any pair no entry has."""
-    blob = json.loads(CASES.read_text())
+    blob = json.loads(path.read_text())
     ids_by_pair: dict[tuple[str, str], list[str]] = {}
     for e in index.entries:
         ids_by_pair.setdefault(_pair(e["kind"], e["name"]), []).append(e["id"])
@@ -97,7 +100,7 @@ def build_cases(index: R.Index) -> dict:
                          + "\n".join(stale))
     blob["built"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     blob["index_built"] = index.built
-    CASES.write_text(json.dumps(blob, indent=1, ensure_ascii=False) + "\n")
+    path.write_text(json.dumps(blob, indent=1, ensure_ascii=False) + "\n")
     return blob
 
 
@@ -153,6 +156,10 @@ def replaying_lookup(cassette: dict):
 
 def _no_network(*_a, **_k):
     raise RuntimeError("offline eval reached celonis_api")
+
+
+def _no_tenant_search(phrase: str) -> list[dict]:
+    raise RuntimeError(f"recall-only eval reached the tenant name search for {phrase!r}")
 
 
 # --- the calling agent as a judge ---------------------------------------------
@@ -233,7 +240,7 @@ def run_agent(case: dict, index: R.Index, model: str, mode: str) -> dict:
     phrase = case["phrase"]
     t = time.perf_counter()
     cands = R.search(phrase, index, k=10)
-    row = {"search_ms": (time.perf_counter() - t) * 1000}
+    row = {"search_ms": (time.perf_counter() - t) * 1000, "semantic": index.semantic.ok}
     if case["expect"]:
         row["search_recall10"] = any(index.by_ref[c["id"]]["id"] in case["expect_ids"]
                                      for c in cands)
@@ -389,8 +396,11 @@ def print_disagreements(rows: list[dict]) -> None:
         print(f"  {r['id']} right: {', '.join(right) or 'none'}: {r['phrase']!r}\n      {picks}")
 
 
-def print_delta(summary: dict, base: dict) -> None:
+def print_delta(summary: dict, base: dict, semantic: str) -> None:
     print(f"\nvs baseline {base.get('at', '?')} ({base.get('mode', '?')}):")
+    if semantic != "unused" and base.get("semantic", "unrecorded") != semantic:
+        print(f"  ! baseline search ran with semantic={base.get('semantic', 'unrecorded')}, this run "
+              f"with semantic={semantic}: agent and search@10 deltas compare different rankings")
     pct = lambda s, k, n: 100 * s[k] / s[n] if s.get(n) else 0.0
     for b, s in summary.items():
         o = base["summary"].get(b)
@@ -405,6 +415,52 @@ def print_delta(summary: dict, base: dict) -> None:
         print("  agent: no baseline")
 
 
+# --- recall only ---------------------------------------------------------------
+
+def semantic_mode(rows: list[dict]) -> str:
+    """Did celonis_search rank with embeddings: on, off, or mixed (the layer dropped mid-run)."""
+    used = {r["semantic"] for r in rows if "semantic" in r}
+    return "mixed" if len(used) > 1 else "on" if used == {True} else "off"
+
+
+def recall_row(case: dict, index: R.Index) -> dict:
+    """Where BM25 and celonis_search put a right entry. Pure and local."""
+    phrase, want = case["phrase"], set(case["expect_ids"])
+    ranked = [e["id"] for _, e in index.top_scored(phrase, k=len(index.entries))]
+    first = next((n for n, i in enumerate(ranked, 1) if i in want), None)
+    hit = any(index.by_ref[r]["id"] in want
+              for c in R.search(phrase, index, k=10)
+              for r in [c["id"]] + [x["id"] for x in c["copies"]])
+    return {"id": case["id"], "bucket": case["bucket"], "phrase": phrase, "semantic": index.semantic.ok,
+            "bm25_rank": first, "bm25_10": bool(first and first <= 10),
+            "bm25_30": bool(first and first <= 30), "search_10": hit}
+
+
+def run_recall(cases: list[dict], index: R.Index, cases_path: Path) -> None:
+    rows = [recall_row(c, index) for c in cases if c["expect"]]
+    summary = {}
+    print(f"\n{'bucket':<11} {'n_present':>9}  {'bm25@10':<11} {'bm25@30':<11} {'search@10':<11}")
+    for b in BUCKETS + ("ALL",):
+        rs = [r for r in rows if b == "ALL" or r["bucket"] == b]
+        s = summary[b] = {"n_present": len(rs), **{k: sum(r[k] for r in rs)
+                                                   for k in ("bm25_10", "bm25_30", "search_10")}}
+        print(f"{b:<11} {s['n_present']:>9}  {_frac(s['bm25_10'], len(rs)):<11} "
+              f"{_frac(s['bm25_30'], len(rs)):<11} {_frac(s['search_10'], len(rs)):<11}")
+    missed = [r for r in rows if not r["search_10"]]
+    print(f"\nmissed by search@10: {len(missed)}")
+    for r in missed:
+        print(f"  {r['id']} {r['bucket']:<10} bm25 rank {r['bm25_rank'] or 'unranked'}: {r['phrase']!r}")
+    semantic = semantic_mode(rows)
+    print("\nMETRIC " + " ".join(f"{b}_search@10={summary[b]['search_10']}/{summary[b]['n_present']}"
+                                 for b in ("paraphrase", "exact", "overlap")) + f" semantic={semantic}")
+    BENCH.mkdir(exist_ok=True)
+    out = BENCH / f"recall-{cases_path.stem}-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    out.write_text(json.dumps({"mode": "recall", "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                               "cases": cases_path.name, "index_built": index.built,
+                               "semantic": semantic, "summary": summary, "rows": rows}, indent=1, ensure_ascii=False) + "\n")
+    print(f"wrote {out.relative_to(HERE)}")
+
+
 # --- entry --------------------------------------------------------------------
 
 def main() -> None:
@@ -414,6 +470,12 @@ def main() -> None:
     mode.add_argument("--offline", action="store_true")
     ap.add_argument("--baseline", action="store_true")
     ap.add_argument("--build-cases", action="store_true")
+    ap.add_argument("--cases", type=Path, default=CASES, help="labelled set (default celonis-eval.json)")
+    ap.add_argument("--recall-only", action="store_true",
+                    help="BM25 and celonis_search recall only: no judges, no Jev, no network")
+    ap.add_argument("--semantic", choices=("auto", "on", "off"), default="auto",
+                    help="embedding ranking in celonis_search: auto uses it when a local model "
+                         "answers; on fails without one")
     ap.add_argument("--only", default="")
     ap.add_argument("--judges", default="code,jev",
                     help="code and jev always run; add agent for the calling-agent judge")
@@ -425,6 +487,8 @@ def main() -> None:
     judges = {j.strip() for j in args.judges.split(",") if j.strip()}
     if not {"code", "jev"} <= judges <= set(JUDGES):
         ap.error(f"--judges takes code,jev optionally with agent; got {args.judges!r}")
+    if args.recall_only and (live or "agent" in judges):
+        ap.error("--recall-only runs no judges and no network")
     if args.fresh_agent and not live:
         ap.error("--fresh-agent needs --live")
     agent = None
@@ -434,16 +498,25 @@ def main() -> None:
             ap.error("the agent judge runs `claude -p`, and no `claude` is on PATH; install "
                      "Claude Code or drop agent from --judges")
 
+    if args.semantic == "off":
+        celonis_embed.URL = "off"
     index = R.Index()
+    if args.semantic == "on" and index.semantic.rank("semantic probe") is None:
+        ap.error(f"--semantic on: {index.semantic.warning or 'no embedding model answered'}")
     if args.build_cases:
-        print_case_counts(build_cases(index))
+        print_case_counts(build_cases(index, args.cases))
         return
-    blob = json.loads(CASES.read_text())
+    blob = json.loads(args.cases.read_text())
     if blob.get("index_built") != index.built:
         print(f"! labels built against index {blob.get('index_built')}, index is {index.built}; "
               f"rerun --build-cases")
     only = {x.strip() for x in args.only.split(",") if x.strip()}
     cases = [c for c in blob["cases"] if not only or c["id"] in only]
+    if args.recall_only:
+        celonis_api.base = celonis_api.headers = _no_network
+        R.named_lookup = _no_tenant_search
+        run_recall(cases, index, args.cases)
+        return
 
     BENCH.mkdir(exist_ok=True)
     cassette = json.loads(CASSETTE.read_text()) if CASSETTE.exists() else {"named_lookup": {}}
@@ -464,13 +537,16 @@ def main() -> None:
 
     name = "live" if live else "offline"
     summary = summarize(rows)
+    semantic = semantic_mode(rows) if agent else "unused"
     result = {"mode": name, "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "index_built": index.built,
-              "cases_built": blob.get("built"), "summary": summary, "rows": rows}
+              "cases_built": blob.get("built"), "semantic": semantic, "summary": summary, "rows": rows}
     out = BENCH / f"eval-{name}-{time.strftime('%Y%m%d-%H%M%S')}.json"
     out.write_text(json.dumps(result, indent=1, ensure_ascii=False) + "\n")
 
     print_rows(rows)
     print_table(summary, name)
+    if agent:
+        print(f"celonis_search for the agent judge: semantic={semantic}")
     if summary["ALL"]["errors"]:
         print(f"\n! {summary['ALL']['errors']} case(s) errored and are scored wrong; see ERROR above")
     if summary["ALL"]["degraded"]:
@@ -478,7 +554,7 @@ def main() -> None:
               f"unavailable); offline replay cannot reproduce them")
     print_disagreements(rows)
     if BASELINE.exists():
-        print_delta(summary, json.loads(BASELINE.read_text()))
+        print_delta(summary, json.loads(BASELINE.read_text()), semantic)
     if args.baseline and summary["ALL"]["degraded"]:
         print("\nnot saved as the baseline: a degraded run is not the path offline replays")
         args.baseline = False

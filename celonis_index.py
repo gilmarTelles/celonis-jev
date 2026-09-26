@@ -6,6 +6,9 @@ resolver searches, and prints what it holds.
 
   python3 celonis_index.py            # refresh and summarise
   python3 celonis_index.py --quiet    # refresh only
+  python3 celonis_index.py --embed    # embed the current index for semantic search (resumable)
+
+A normal refresh also embeds new entries when a local Ollama answers (see celonis_embed).
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import time
 from pathlib import Path
 
 import celonis_api as api
+import celonis_embed
 import celonis_types
 import cliargs
 
@@ -292,6 +296,9 @@ def add_columns(doc: dict, snap: dict) -> int:
 
 def main() -> None:
     _, opts = cliargs.parse_argv(sys.argv[1:])
+    if "--embed" in opts:
+        celonis_embed.embed_index(json.loads(OUT.read_text())["entries"])
+        return
     doc = build()
     snap = columns_snapshot()
     COLUMNS_OUT.write_text(json.dumps(snap, indent=1))
@@ -307,6 +314,7 @@ def main() -> None:
             print(f"  {k:<14} {v}")
         print(f"  {with_columns} tables carry columns -> {COLUMNS_OUT.name} "
               f"({COLUMNS_OUT.stat().st_size:,} bytes, scan {snap['built'] or 'unknown'})")
+    celonis_embed.embed_index(doc["entries"], required=False)
 
 
 if __name__ == "__main__":

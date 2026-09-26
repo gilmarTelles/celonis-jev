@@ -40,7 +40,10 @@ TOOLS = [
         "description": ("Find Celonis assets, KPIs, objects, tables and pages matching a phrase. "
                         "Returns ranked candidates with ids, one per kind and name; copies lists "
                         "other instances, so pick the one in the right container. Local index only: "
-                        "no Jev key, tenant or browser needed. Then pass an id to celonis_open "
+                        "no Jev key, tenant or browser needed. Candidates come in rank order "
+                        "(BM25 fused with a local embedding model when one runs); score is the "
+                        "BM25 score and is 0 for a match only the embedding found. warnings "
+                        "says when semantic ranking is off. Then pass an id to celonis_open "
                         "or celonis_read."),
         "inputSchema": {"type": "object", "properties": {
             "phrase": {"type": "string", "description": "What to look for."},
@@ -119,6 +122,23 @@ def parse_args(name: str, raw) -> tuple[dict, str | None]:
     return args, None
 
 
+_index: dict = {}
+
+
+def shared_index() -> R.Index:
+    """One index per server process, reloaded when celonis-index.json changes.
+
+    Loading it (and the embedding cache behind search) is the slow part of a call.
+    """
+    try:
+        stamp = R.INDEX.stat().st_mtime_ns
+    except OSError:
+        stamp = None
+    if _index.get("stamp", object()) != stamp:
+        _index.update(stamp=stamp, index=R.Index())
+    return _index["index"]
+
+
 def _tab() -> dict | None:
     """The signed-in tenant tab, or None when there is no CDP browser at all."""
     try:
@@ -128,12 +148,12 @@ def _tab() -> dict | None:
 
 
 def search(args: dict) -> dict:
-    return _text(C.search_report(args["phrase"], R.Index(), args["k"],
+    return _text(C.search_report(args["phrase"], shared_index(), args["k"],
                                  "pick one and call celonis_open or celonis_read with its id"))
 
 
 def resolve(args: dict) -> dict:
-    hit = R.resolve(args["phrase"], index=R.Index(), verbose=False)
+    hit = R.resolve(args["phrase"], index=shared_index(), verbose=False)
     return _text({"hit": {"id": hit.ref, "name": hit.name, "kind": hit.kind,
                           "url": hit.url} if hit.name else None,
                   "reason": hit.reason,
@@ -153,7 +173,7 @@ def _opened(name: str, kind: str, url: str, handle: str, warnings: list[str], **
 
 
 def open_(args: dict) -> dict:
-    index = R.Index()
+    index = shared_index()
     if args.get("id"):
         try:
             e = R.entry_for(args["id"], index)
@@ -176,7 +196,7 @@ def open_(args: dict) -> dict:
 
 
 def read(args: dict) -> dict:
-    index = R.Index()
+    index = shared_index()
     warnings: list[str] = []
     if args.get("id"):
         try:

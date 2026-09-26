@@ -33,11 +33,13 @@ import re
 import sys
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 import requests
 
 import celonis_api
+import celonis_embed
 import jev
 from celonis_types import CONTAINER_KINDS, Resolution
 
@@ -46,6 +48,8 @@ COLUMNS = Path(__file__).with_name("celonis-columns.json")
 SHORTLIST = 10        # the first prompt: candidates are what a judgment costs
 SHORTLIST_FULL = 30   # re-asked only when the first pass refuses or is not sure
 MAX_COPIES = 10       # other instances a search candidate lists
+PHRASE_MEMO = 1024    # per-phrase boosts an Index keeps before starting over
+RRF_K = 60            # reciprocal-rank fusion constant (the usual 60)
 
 
 class T:
@@ -81,6 +85,48 @@ def tokens(s: str) -> list[str]:
     return [w for w in re.findall(r"[a-z0-9]+", s.lower()) if w not in STOP and len(w) > 1]
 
 
+_VOWEL = re.compile(r"[aeiouy]")
+
+
+@lru_cache(maxsize=1 << 16)
+def stem(w: str) -> str:
+    """A light English suffix strip, so 'postings', 'posting' and 'Posting' score as one word.
+
+    Plurals: 'entries' -> 'entry', 'boxes' -> 'box', 'cases' -> 'case', 'kpis' -> 'kpi';
+    'process', 'status', 'analysis' and 'business' are not plurals and stay whole.
+    """
+    if len(w) <= 3 or not w.isalpha():
+        return w
+    if w.endswith("ies") and len(w) > 4:
+        w = w[:-3] + "y"
+    elif w.endswith(("sses", "xes", "zes", "ches", "shes")):
+        w = w[:-2]
+    elif w.endswith("s") and not w.endswith(("ss", "us")) and not (w.endswith("is") and len(w) >= 5):
+        w = w[:-1]
+    for suf in ("ing", "ed", "ly"):
+        base = w[:-len(suf)]
+        if w.endswith(suf) and len(base) >= 3 and _VOWEL.search(base):
+            w = base[:-1] if len(base) > 3 and base[-1] == base[-2] and base[-1] not in "lsz" else base
+            break
+    return w[:-1] if len(w) > 4 and w.endswith("e") else w
+
+
+RANK_STOP = frozenset(STOP | {stem(w) for w in STOP})
+
+
+@lru_cache(maxsize=1 << 16)
+def stems(s: str) -> tuple[str, ...]:
+    """The ranking normaliser: every word stemmed, then stopwords dropped.
+
+    Stopwords go after stemming so 'showing' and 'shows' do not come back as
+    'show'. Ranking only: literal matching (decide, kinds, containers) uses
+    `tokens()`, the words as said.
+    """
+    s = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", s or "")
+    return tuple(t for w in re.findall(r"[a-z0-9]+", s.lower())
+                 if len(t := stem(w)) > 1 and t not in RANK_STOP)
+
+
 # The words people use for a kind, longest phrase first. Container words (pool,
 # space, package) are deliberately absent: "the tax package" locates a thing, it
 # does not name a kind, and boosting `package` there picks the wrong entry.
@@ -112,6 +158,97 @@ def _contains(q: list[str], w: list[str]) -> bool:
 
 
 KINDS = tuple((tuple(_sing(t) for t in w.split()), k) for w, k in KIND_WORDS)
+
+
+# Generic finance / SAP / process-mining synonyms and abbreviations (EN + PT); not tenant data.
+# A group fires on a distinctive or multi-word member. Words that appear in half
+# the asks (order, item, open, total, value, view, model, table, user, close,
+# update, pool, kpi, report, board, data) are not members: they would fire their
+# group on almost everything.
+DOMAIN_SYNONYMS = (
+    ("general ledger", "gl", "ledger", "journal", "razao", "contabil"),
+    ("journal entry", "je", "posting", "lancamento", "accounting document"),
+    ("accounts payable", "ap", "payables", "contas pagar", "fornecedores"),
+    ("accounts receivable", "ar", "receivables", "contas receber"),
+    ("vendor", "supplier", "fornecedor", "creditor", "lifnr"),
+    ("customer", "client", "cliente", "debtor", "kunnr", "buyer"),
+    ("invoice", "bill", "fatura", "nota fiscal", "nf", "billing"),
+    ("purchase order", "po", "pedido compra", "ebeln"),
+    ("purchase requisition", "pr", "requisition", "requisicao", "banfn"),
+    ("sales order", "so", "pedido venda", "vbeln"),
+    ("goods receipt", "gr", "receipt", "recebimento", "migo"),
+    ("goods issue", "gi", "delivery", "shipment", "remessa", "entrega"),
+    ("payment", "remittance", "pagamento", "paid", "settlement", "disbursement"),
+    ("cash", "caixa", "treasury", "tesouraria", "bank", "banco"),
+    ("aging", "ageing", "overdue", "past due", "days outstanding", "vencido", "atraso", "late"),
+    ("dso", "days sales outstanding", "collection period"),
+    ("dpo", "days payable outstanding"),
+    ("dio", "days inventory outstanding"),
+    ("due date", "vencimento", "maturity", "net due"),
+    ("discount", "desconto", "cash discount", "early payment"),
+    ("payment terms", "terms", "condicao pagamento", "zterm"),
+    ("dashboard", "painel", "relatorio"),
+    ("metric", "indicator", "measure", "indicador"),
+    ("cycle time", "throughput time", "lead time", "duration", "tempo ciclo"),
+    ("rework", "retrabalho", "repetition", "loop"),
+    ("automation rate", "automation", "touchless", "no touch", "automacao"),
+    ("manual", "human", "manually"),
+    ("variant", "path", "variante"),
+    ("activity", "event", "step", "atividade", "evento"),
+    ("case", "process instance", "caso"),
+    ("conformance", "compliance", "deviation", "violation"),
+    ("maverick", "off contract", "non compliant"),
+    ("company code", "bukrs", "entity", "empresa", "legal entity"),
+    ("plant", "werks", "site", "planta", "centro"),
+    ("material", "product", "sku", "matnr", "produto"),
+    ("inventory", "stock", "estoque", "warehouse"),
+    ("cost center", "kostl", "centro custo"),
+    ("profit center", "prctr", "centro lucro"),
+    ("tax", "vat", "imposto", "tributo", "icms", "withholding"),
+    ("credit memo", "credit note", "nota credito"),
+    ("debit memo", "debit note", "nota debito"),
+    ("amount", "valor", "net value"),
+    ("currency", "moeda", "waers"),
+    ("revenue", "sales", "receita", "vendas", "faturamento", "turnover"),
+    ("expense", "cost", "custo", "despesa", "spend", "spending"),
+    ("procurement", "purchasing", "p2p", "purchase to pay", "compras", "sourcing"),
+    ("order to cash", "o2c", "otc"),
+    ("record to report", "r2r", "fechamento"),
+    ("month end", "period end", "period close"),
+    ("accrual", "provisao", "provision"),
+    ("reconciliation", "recon", "conciliacao", "matching", "match"),
+    ("three way match", "3 way match", "3wm"),
+    ("blocked", "block", "hold", "bloqueio", "bloqueado"),
+    ("approval", "release", "aprovacao", "workflow"),
+    ("contract", "agreement", "contrato", "outline agreement"),
+    ("duplicate", "duplicated", "duplicidade", "double"),
+    ("fiscal year", "fy", "gjahr", "exercicio"),
+    ("period", "month", "periodo", "mes"),
+    ("usuario", "resource"),
+    ("master data", "cadastro", "mdm"),
+    ("change", "alteracao", "modification", "modified"),
+    ("cancel", "cancellation", "reversal", "storno", "estorno", "reversed"),
+    ("dunning", "collection", "cobranca", "reminder"),
+    ("working capital", "wc", "capital giro"),
+    ("on time", "otd", "punctual", "pontual"),
+    ("backlog", "pending", "aberto", "pendente", "outstanding"),
+    ("data model", "knowledge model", "semantic model"),
+    ("data pool", "data source"),
+    ("tabela", "dataset"),
+    ("action flow", "automation flow", "skill"),
+)
+
+SYNONYM_WEIGHT = 0.5    # an expanded word counts half what the ask's own word counts
+SYNONYM_GROUPS = tuple(tuple(m for m in map(stems, g) if m) for g in DOMAIN_SYNONYMS)
+
+
+def expansions(q: tuple[str, ...]) -> set[str]:
+    """Ranking terms the domain table adds to the ask's own (`stems`) terms."""
+    out: set[str] = set()
+    for g in SYNONYM_GROUPS:
+        if any(_contains(q, m) for m in g):
+            out.update(t for m in g for t in m)
+    return out - set(q)
 
 
 def implied_kind(phrase: str) -> str | None:
@@ -258,21 +395,33 @@ class Index:
         self.columns = columns if columns is not None else Columns()
         self.df: dict[str, int] = {}
         for e in self.entries:
-            for t in set(tokens(e["name"]) + tokens(e.get("key", ""))):
+            for t in set(stems(e["name"]) + stems(e.get("key", ""))):
                 self.df[t] = self.df.get(t, 0) + 1
         self.n = max(1, len(self.entries))
         self._boosts: dict[str, dict] = {}
+        self._semantic: "celonis_embed.Embeddings | None" = None
+
+    @property
+    def semantic(self) -> "celonis_embed.Embeddings":
+        """Semantic ranking over the cached entry vectors; never embeds the index itself."""
+        if self._semantic is None:
+            self._semantic = celonis_embed.Embeddings(self.entries)
+        return self._semantic
 
     def idf(self, t: str) -> float:
         return math.log(1 + self.n / (1 + self.df.get(t, 0)))
 
     def boosts(self, phrase: str) -> dict:
-        """What the ask already tells us, per entry id: alias text, containers, kind.
+        """What the ask already tells us, per entry id: alias text, containers, kind,
+        and the synonym terms it adds.
 
-        Computed once per phrase, from the index and the vocabulary - no model.
+        Computed once per phrase (the last PHRASE_MEMO phrases), from the index
+        and the vocabulary - no model.
         """
         if phrase in self._boosts:
             return self._boosts[phrase]
+        if len(self._boosts) >= PHRASE_MEMO:
+            self._boosts.clear()
         text: dict[str, set[str]] = {}
         flat: dict[str, float] = {}
         said: list[str] = []                     # containers the vocabulary names: facts
@@ -292,29 +441,35 @@ class Index:
                 b += KIND_HIT
             if b:
                 flat[e["id"]] = flat.get(e["id"], 0.0) + b
-        self._boosts[phrase] = {"text": text, "flat": flat, "said": said}
+        self._boosts[phrase] = {"text": text, "flat": flat, "said": said,
+                                "syn": expansions(stems(phrase))}
         return self._boosts[phrase]
 
     def score(self, phrase: str, e: dict) -> float:
-        q = tokens(phrase)
+        q = stems(phrase)
         if not q:
             return 0.0
-        name = set(tokens(e["name"]) + tokens(e.get("key", "")))
-        ctx = set(tokens(f'{e.get("package","")} {e.get("space","")} {e.get("pool","")}'))
+        name = set(stems(e["name"]) + stems(e.get("key", "")))
+        ctx = set(stems(f'{e.get("package","")} {e.get("space","")} {e.get("pool","")}'))
         s = sum(self.idf(t) * (2.0 if t in name else 0.5 if t in ctx else 0.0) for t in q)
+        b = self.boosts(phrase)
+        extra = b["syn"]
+        if extra:
+            s += SYNONYM_WEIGHT * sum(self.idf(t) * (2.0 if t in name else 0.5 if t in ctx else 0.0)
+                                      for t in extra)
         if e["name"].lower() in phrase.lower():
             s += 4.0
-        if e["kind"] == "table" and not set(q) & name:
+        if e["kind"] == "table" and not set(q) & name and not extra & name:
             # A table is its name plus its columns. Container context alone is
             # not evidence: large pools contain many unrelated tables.
             held = {str(c).lower() for c in (e.get("columns") or [])}
-            if not set(q) & held:
+            if not set(tokens(phrase)) & held:
                 return 0.0
-        b = self.boosts(phrase)
         s += b["flat"].get(e["id"], 0.0)
         alias_text = b["text"].get(e["id"])
         if alias_text:
-            s += sum(self.idf(t) for t in q if t in alias_text)
+            alias_terms = {stem(t) for t in alias_text}
+            s += sum(self.idf(t) for t in q if t in alias_terms)
         return s
 
     def top_scored(self, phrase: str, k: int = SHORTLIST) -> list[tuple[float, dict]]:
@@ -361,10 +516,38 @@ def entry_for(handle: str, index: Index) -> dict:
     return entry
 
 
+def ranked(phrase: str, index: Index) -> list[tuple[float, dict]]:
+    """BM25, fused with the embedding ranking when a local model is up.
+
+    Reciprocal-rank fusion: each list contributes 1/(RRF_K + rank), so an entry
+    both rankings like leads, and one only the embedding finds (a paraphrase, no
+    shared word) can still enter. As in `top_scored`, a container the ask named
+    leads the fused order. The score carried is BM25's (0 when only the
+    embedding found it). With no model this is `top_scored` unchanged.
+    """
+    bm = index.top_scored(phrase, k=len(index.entries))
+    sem = index.semantic.rank(phrase)
+    if sem is None:
+        return bm
+    fused: dict[int, float] = {}
+    bm_score = {id(e): s for s, e in bm}
+    by_id = {id(e): e for _, e in sem} | {id(e): e for _, e in bm}
+    for ranking in (bm, sem):
+        for r, (_, e) in enumerate(ranking, 1):
+            fused[id(e)] = fused.get(id(e), 0.0) + 1.0 / (RRF_K + r)
+    order = [(bm_score.get(i, 0.0), by_id[i]) for i in sorted(fused, key=lambda i: -fused[i])]
+    said = index.boosts(phrase)["said"]
+    if said:
+        order = ([x for x in order if in_container(x[1], said)]
+                 + [x for x in order if not in_container(x[1], said)])
+    return order
+
+
 def search(phrase: str, index: Index, k: int = 10) -> list[dict]:
     """Candidates for a phrase, one per (kind, name), with the handle to open each.
 
-    Local and pure: no Jev, no tenant call. Entries sharing a kind and a name
+    Local: no Jev, no tenant call. The ranking is `ranked()`: BM25, fused with a
+    local embedding model when one answers (celonis_embed). Entries sharing a kind and a name
     collapse into their best-ranked representative. They are not always copies
     (a table name repeats across pools with different data, a KPI name across
     packages with different PQL), so `copies` lists the other instances with
@@ -372,15 +555,23 @@ def search(phrase: str, index: Index, k: int = 10) -> list[dict]:
     all. A deterministic answer (alias, spelled-out name, named column) leads,
     marked `exact`. The collapse lives here only: inside the Jev shortlist it
     changes which answers get flagged for confirmation.
+
+    `rank` is the entry's position in `ranked()` (the fused order when semantic
+    ranking is on); `score` is its BM25 score, 0 for an entry only the embedding
+    found, so candidates are ordered by rank, not score.
     """
     out: list[dict] = []
     groups: dict[tuple[str, str], dict] = {}
     shown: set[int] = set()
 
+    order = ranked(phrase, index)
+    rank = {id(e): n for n, (_, e) in enumerate(order, 1)}
+
     def add(score: float, e: dict, **extra) -> None:
         out.append({"id": ref(e), "name": e["name"], "kind": e["kind"],
                     "container": _trail_entry(e)["container"], "url": e["url"],
-                    "score": round(score, 2), "instances": 1, "copies": [], **extra})
+                    "rank": rank.get(id(e)), "score": round(score, 2), "instances": 1,
+                    "copies": [], **extra})
         groups[(e["kind"], e["name"])] = out[-1]
         shown.add(id(e))
 
@@ -390,7 +581,7 @@ def search(phrase: str, index: Index, k: int = 10) -> list[dict]:
         pinned = same_thing_in_container(phrase, entry, index)
         entry = pinned[0] if pinned else entry
         add(index.score(phrase, entry), entry, exact=True, why=path_for(why))
-    for score, e in index.top_scored(phrase, k=len(index.entries)):
+    for score, e in order:
         if id(e) in shown:
             continue
         group = groups.get((e["kind"], e["name"]))
