@@ -215,7 +215,8 @@ def parse_pick(text: str, cands: list[dict]) -> str:
     except json.JSONDecodeError:
         raise ValueError(f"not JSON: {text[:80]!r}")
     pick = got.get("pick") if isinstance(got, dict) else None
-    if pick != "none" and pick not in {c["id"] for c in cands}:
+    ids = {c["id"] for c in cands} | {x["id"] for c in cands for x in c["copies"]}
+    if pick != "none" and pick not in ids:
         raise ValueError(f"pick {pick!r} is not a candidate id")
     return pick
 
@@ -248,8 +249,8 @@ def run_agent(case: dict, index: R.Index, model: str, mode: str) -> dict:
         pick = parse_pick(ans["result"], cands)
         row["agent_id"] = pick
         res = agent_resolution(phrase, pick, index)
-    except (AgentMiss, ValueError, subprocess.TimeoutExpired) as e:
-        row["agent_error"] = str(e)
+    except (AgentMiss, ValueError, TypeError, OSError, subprocess.TimeoutExpired) as e:
+        row["agent_error"] = f"{type(e).__name__}: {e}"
     row |= {"agent_ok": correct(res, case), "agent_pick": pick_of(res)}
     return row
 
@@ -429,6 +430,9 @@ def main() -> None:
     agent = None
     if "agent" in judges:
         agent = (args.agent_model, "fresh" if args.fresh_agent else "live" if live else "offline")
+        if live and shutil.which("claude") is None:
+            ap.error("the agent judge runs `claude -p`, and no `claude` is on PATH; install "
+                     "Claude Code or drop agent from --judges")
 
     index = R.Index()
     if args.build_cases:
@@ -451,9 +455,12 @@ def main() -> None:
         R.named_lookup = replaying_lookup(cassette["named_lookup"])
         client = ReplayJev()
 
-    rows = [run_case(c, index, client, agent) for c in cases]
-    if live:
-        CASSETTE.write_text(json.dumps(cassette, indent=1, ensure_ascii=False) + "\n")
+    try:
+        rows = [run_case(c, index, client, agent) for c in cases]
+    finally:
+        # A crash mid-run keeps the name searches it already paid for.
+        if live:
+            CASSETTE.write_text(json.dumps(cassette, indent=1, ensure_ascii=False) + "\n")
 
     name = "live" if live else "offline"
     summary = summarize(rows)
