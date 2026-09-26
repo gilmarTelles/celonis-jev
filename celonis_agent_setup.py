@@ -8,24 +8,24 @@ Idempotent, reversible, and it tells you what it touched.
 
 What it does:
 
-  1. symlinks omp/celonis.ts into ~/.omp/agent/extensions/  (omp extension:
-     celonis_resolve / celonis_open / celonis_read / celonis_doctor + /celonis)
-  2. adds the MCP server to ~/.omp/agent/mcp.json           (any session, any repo)
-  3. copies the same entry into ~/.claude/mcp.json if that host is present
-  4. runs `celonis_cli.py doctor` and prints what still needs a human
+  1. adds the MCP server to ~/.omp/agent/mcp.json           (any session, any repo)
+  2. copies the same entry into ~/.claude/mcp.json if that host is present
+  3. runs `celonis_cli.py doctor` and prints what still needs a human
+
+MCP is the one agent interface. Install and `--uninstall` both remove the omp
+extension symlink older versions installed, when it is dangling or points into
+this repo; `--check` reports it.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 HOME = Path(__file__).resolve().parent
-OMP_EXT = Path.home() / ".omp/agent/extensions/celonis.ts"
+OLD_OMP_EXT = Path.home() / ".omp/agent/extensions/celonis.ts"
 PROJECT_MCP = HOME / ".omp/mcp.json"
 OMP_MCP = Path.home() / ".omp/agent/mcp.json"
 CLAUDE_MCP = Path.home() / ".claude/mcp.json"
@@ -64,24 +64,12 @@ def patch_mcp(path: Path, check: bool, uninstall: bool) -> str:
     return f"{'keep' if present else 'add'}   {path}"
 
 
-def link_extension(check: bool, uninstall: bool) -> str:
-    source = HOME / "omp/celonis.ts"
-    if not OMP_EXT.parent.exists():
-        return "skip   ~/.omp/agent/extensions (omp not installed)"
-    if uninstall:
-        if OMP_EXT.is_symlink() or OMP_EXT.exists():
-            OMP_EXT.unlink()
-            return "remove ~/.omp/agent/extensions/celonis.ts"
-        return "skip   no extension to remove"
-    if check:
-        return f"{'have' if OMP_EXT.exists() else 'miss'}   {OMP_EXT} (would link -> {source})"
-    if OMP_EXT.is_symlink() and OMP_EXT.resolve() == source:
-        return f"keep   {OMP_EXT} -> {source}"
-    if OMP_EXT.exists():
-        OMP_EXT.with_suffix(f".ts.bak-{stamp()}").write_text(OMP_EXT.read_text())
-        OMP_EXT.unlink()
-    OMP_EXT.symlink_to(source)
-    return f"link   {OMP_EXT} -> {source}"
+def stale_extension(link: Path = OLD_OMP_EXT) -> bool:
+    """Is `link` the extension an older install made: a symlink whose target is
+    gone or lies in this repo? Anything else there is someone else's file."""
+    if not link.is_symlink():
+        return False
+    return not link.exists() or link.resolve().is_relative_to(HOME)
 
 
 def doctor() -> int:
@@ -94,8 +82,13 @@ def main() -> int:
     check = "--check" in sys.argv
     uninstall = "--uninstall" in sys.argv
     print(f"celonis-jev at {HOME}\n")
-    for line in (link_extension(check, uninstall),
-                 patch_mcp(OMP_MCP, check, uninstall),
+    if stale_extension():
+        if check:
+            print(f"  stale  {OLD_OMP_EXT} (extension from an older install; would remove)")
+        else:
+            OLD_OMP_EXT.unlink()
+            print(f"  remove {OLD_OMP_EXT} (extension from an older install)")
+    for line in (patch_mcp(OMP_MCP, check, uninstall),
                  patch_mcp(PROJECT_MCP, check, uninstall),
                  patch_mcp(CLAUDE_MCP, check, uninstall)):
         print(" ", line)
@@ -104,7 +97,6 @@ def main() -> int:
     if not uninstall:
         code = doctor()
         print("\nIn omp:  /mcp reload   then  /mcp list  (should show celonis) and /mcp test celonis")
-        print("Extension tools load at startup - start a new omp process for those.")
         return code
     return 0
 

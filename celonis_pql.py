@@ -58,6 +58,21 @@ def find_kpi(name: str, index) -> tuple[dict, dict] | None:
     return loose[0] if loose else None
 
 
+def kpi_definition(entry: dict, index) -> tuple[dict, dict]:
+    """The definition of one indexed KPI and its model, from that model alone.
+
+    One request: the entry already names its model, so no other model is scanned.
+    """
+    if entry["kind"] != "kpi":
+        raise LookupError(f"read needs a KPI; {entry['name']!r} is a {entry['kind']}, "
+                          f"open it instead")
+    found = next((d for d in kpi_defs(entry["model"]) if d.get("id") == entry["id"]), None)
+    if found is None:
+        raise LookupError(f"its model no longer defines KPI {entry['id']!r}; "
+                          f"refresh the index (celonis_index.py)")
+    return found, index.by_id[entry["model"]]
+
+
 def execute(pql: str, km_entry: dict, index, tab: dict) -> dict:
     """Run one PQL against the model `km_entry` names, through the signed-in tab."""
     pkg_key, km_key = km_coord(index, km_entry)

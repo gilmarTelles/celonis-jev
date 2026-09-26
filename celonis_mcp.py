@@ -5,10 +5,15 @@
 Stdio transport, newline-delimited JSON-RPC, no dependencies beyond this repo
 (the resolver, the index, cdp.py). Tools:
 
-    celonis_resolve(phrase)  -> where a phrase points, with alternatives
-    celonis_open(phrase)     -> resolve, then navigate the signed-in tab
-    celonis_read(phrase)     -> resolve to a KPI, run its PQL, return the rows
-    celonis_doctor()         -> what is missing, and the one command that fixes it
+    celonis_search(phrase)       -> candidates with ids, other instances as copies (no Jev)
+    celonis_open(id | phrase)    -> navigate the signed-in tab; the URL either way
+    celonis_read(id | phrase)    -> run a KPI's PQL, return the rows
+    celonis_resolve(phrase)      -> where a phrase points, with alternatives (Jev)
+    celonis_doctor()             -> what is missing, and the one command that fixes it
+
+The flow an agent follows: search, pick a candidate, open or read it by id.
+Only a phrase that needs judgment reaches Jev, so search and every by-id call
+work with no TypeSafe key.
 """
 
 from __future__ import annotations
@@ -26,31 +31,45 @@ import cdp
 VERSION = "0.1.0"
 PROTOCOL = "2024-11-05"
 
+ONE_OF = {"id": {"type": "string", "description": "A candidate id from celonis_search."},
+          "phrase": {"type": "string", "description": "What the user wants, in their words."}}
+
 TOOLS = [
     {
-        "name": "celonis_resolve",
-        "description": ("Resolve a plain-language request to a Celonis location: which space, "
-                        "package, asset, object, event, KPI or app page it refers to, plus a "
-                        "ready-to-use deep link and the runner-up candidates with "
-                        "probabilities. Read-only; no browser needed."),
+        "name": "celonis_search",
+        "description": ("Find Celonis assets, KPIs, objects, tables and pages matching a phrase. "
+                        "Returns ranked candidates with ids, one per kind and name; copies lists "
+                        "other instances, so pick the one in the right container. Local index only: "
+                        "no Jev key, tenant or browser needed. Then pass an id to celonis_open "
+                        "or celonis_read."),
         "inputSchema": {"type": "object", "properties": {
-            "phrase": {"type": "string", "description": "What the user wants, in their words."}},
+            "phrase": {"type": "string", "description": "What to look for."},
+            "k": {"type": "integer", "description": "How many candidates (default 10)."}},
             "required": ["phrase"]},
     },
     {
         "name": "celonis_open",
-        "description": ("Resolve a phrase and navigate the signed-in browser tab to it. Use when "
-                        "the user wants to be taken somewhere. Returns the URL either way."),
-        "inputSchema": {"type": "object", "properties": {
-            "phrase": {"type": "string"}}, "required": ["phrase"]},
+        "description": ("Open one Celonis location in the signed-in browser tab and return its URL "
+                        "either way. Pass an id from celonis_search, or a phrase to resolve "
+                        "(a phrase may need a Jev judgment). Exactly one of id or phrase."),
+        "inputSchema": {"type": "object", "properties": ONE_OF},
     },
     {
         "name": "celonis_read",
-        "description": ("Answer a data question: resolve the phrase to a KPI, run its PQL through "
-                        "the signed-in session and return the resulting rows."),
+        "description": ("Run a KPI's PQL through the signed-in session and return the rows. Pass a "
+                        "KPI id from celonis_search, or a phrase to resolve to a KPI. Exactly one "
+                        "of id or phrase; optional pql runs instead of the KPI's own."),
         "inputSchema": {"type": "object", "properties": {
-            "phrase": {"type": "string"},
-            "pql": {"type": "string", "description": "Optional PQL to run instead of resolving."}},
+            **ONE_OF,
+            "pql": {"type": "string", "description": "Optional PQL to run instead."}}},
+    },
+    {
+        "name": "celonis_resolve",
+        "description": ("Resolve a plain-language request to one Celonis location with a "
+                        "confidence and the runner-ups, each with an id for celonis_open. Uses a "
+                        "Jev judgment when the phrase is ambiguous. Read-only; no browser."),
+        "inputSchema": {"type": "object", "properties": {
+            "phrase": {"type": "string", "description": "What the user wants, in their words."}},
             "required": ["phrase"]},
     },
     {
@@ -67,77 +86,158 @@ def _text(payload, is_error: bool = False) -> dict:
     return {"content": [{"type": "text", "text": body}], "isError": is_error}
 
 
-def call(name: str, args: dict) -> dict:
+NEEDS = {"celonis_search": "phrase", "celonis_resolve": "phrase",
+         "celonis_open": "id|phrase", "celonis_read": "id|phrase"}
+
+
+def parse_args(name: str, raw) -> tuple[dict, str | None]:
+    """The tool boundary: cleaned arguments, or a short message saying what is wrong.
+
+    Strings are stripped and an empty one counts as absent, so the handlers can
+    trust `args["phrase"]`, `args.get("id")` and `args["k"]`.
+    """
+    if not isinstance(raw, dict):
+        return {}, "arguments must be a JSON object"
+    args: dict = {}
+    for key in ("phrase", "id", "pql"):
+        value = raw.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            return {}, f"{key} must be a string"
+        if value.strip():
+            args[key] = value.strip()
+    k = raw.get("k", 10)
+    if isinstance(k, bool) or not isinstance(k, int) or not 1 <= k <= 50:
+        return {}, "k must be an integer from 1 to 50"
+    args["k"] = k
+    need = NEEDS.get(name)
+    if need == "phrase" and "phrase" not in args:
+        return {}, "phrase is required"
+    if need == "id|phrase" and ("id" in args) == ("phrase" in args):
+        return {}, "pass exactly one of id (from celonis_search) or phrase"
+    return args, None
+
+
+def _tab() -> dict | None:
+    """The signed-in tenant tab, or None when there is no CDP browser at all."""
     try:
-        if name == "celonis_resolve":
-            index = R.Index()
-            hit = R.resolve(args["phrase"], index=index, verbose=False)
-            return _text({"hit": {"name": hit.name, "kind": hit.kind,
-                                  "url": hit.url} if hit.name else None,
-                          "reason": hit.reason,
-                          "confidence": hit.confidence, "confirm": hit.confirm,
-                          "intent": hit.intent,
-                          "alternatives": hit.alternatives[:3],
-                          "next": ("open_url" if hit.name else "not_found"),
-                          "warnings": hit.warnings})
-        if name == "celonis_open":
-            index = R.Index()
-            hit = R.resolve(args["phrase"], index=index, verbose=False)
-            if not hit.name:
-                return _text({"opened": False, "reason": hit.reason or "no match",
-                              "alternatives": hit.alternatives[:3],
-                              "warnings": hit.warnings}, is_error=True)
-            if hit.confirm:
-                return _text({"opened": False, "ambiguous": True,
-                              "candidates": [{"name": hit.name, "url": api.absolute(hit.url),
-                                              "confidence": hit.confidence}] + hit.alternatives[:3],
-                              "next": "ask the user which one", "warnings": hit.warnings})
-            url = api.absolute(hit.url)
-            opened = False
-            try:
-                tab = cdp.find_tab("celonis.cloud") or cdp.new_tab(url)
-                cdp.navigate(tab, url)
-                opened = True
-            except Exception:
-                pass
-            return _text({"opened": opened, "url": url, "name": hit.name,
-                          "kind": hit.kind, "confidence": hit.confidence,
-                          "note": "" if opened else "no CDP browser; give the URL to the user",
-                          "warnings": hit.warnings})
-        if name == "celonis_read":
-            index = R.Index()
-            if args.get("pql"):
-                pql = args["pql"]
-                km = R.km_for_ask(args["phrase"], index)
-            else:
-                hit = R.resolve(args["phrase"], index=index, verbose=False)
-                if (hit.kind or "") != "kpi":
-                    return _text({"answered": False,
-                                  "reason": f'"{args["phrase"]}" resolved to '
-                                            f'{hit.kind or "nothing"}; read needs a KPI',
-                                  "url": hit.url}, is_error=True)
-                found = P.find_kpi(hit.name, index)
-                if not found:
-                    return _text({"answered": False, "reason": "no KPI definition matched"}, is_error=True)
-                k, km = found
-                pql = k["pql"]
-            tab = cdp.find_tab("celonis.cloud")
-            if not tab:
-                return _text({"answered": False, "reason": "no signed-in tab on the sandbox "
-                              "(run `celonis doctor`)"}, is_error=True)
-            out = P.execute(pql, km, index, tab)
-            if out.get("error"):
-                return _text({"answered": False, "pql": pql, "error": out["error"][:300]}, is_error=True)
-            return _text({"answered": True, "pql": P.pql_table(pql),
-                          "columns": out["columns"], "rows": out["rows"][:20],
-                          "query_ms": out["ms"],
-                          "warnings": hit.warnings if not args.get("pql") else []})
-        if name == "celonis_doctor":
-            lines = C.doctor(report=False)
-            return _text("\n".join(lines), is_error=any(l.startswith("FAIL") for l in lines))
+        return cdp.find_tab("celonis.cloud")
+    except OSError:
+        return None
+
+
+def search(args: dict) -> dict:
+    return _text(C.search_report(args["phrase"], R.Index(), args["k"],
+                                 "pick one and call celonis_open or celonis_read with its id"))
+
+
+def resolve(args: dict) -> dict:
+    hit = R.resolve(args["phrase"], index=R.Index(), verbose=False)
+    return _text({"hit": {"id": hit.ref, "name": hit.name, "kind": hit.kind,
+                          "url": hit.url} if hit.name else None,
+                  "reason": hit.reason,
+                  "confidence": hit.confidence, "confirm": hit.confirm,
+                  "intent": hit.intent,
+                  "alternatives": hit.alternatives[:3],
+                  "next": ("open_url" if hit.name else "not_found"),
+                  "warnings": hit.warnings})
+
+
+def _opened(name: str, kind: str, url: str, handle: str, warnings: list[str], **extra) -> dict:
+    full, more = api.absolute_or_relative(url)
+    opened = C.navigate(full)
+    return _text({"opened": opened, "url": full, "id": handle, "name": name, "kind": kind,
+                  **extra, "note": "" if opened else "no CDP browser; give the URL to the user",
+                  "warnings": warnings + more})
+
+
+def open_(args: dict) -> dict:
+    index = R.Index()
+    if args.get("id"):
+        try:
+            e = R.entry_for(args["id"], index)
+        except LookupError as err:
+            return _text({"opened": False, "reason": str(err)}, is_error=True)
+        return _opened(e["name"], e["kind"], e["url"], args["id"], [])
+    hit = R.resolve(args["phrase"], index=index, verbose=False)
+    if not hit.name:
+        return _text({"opened": False, "reason": hit.reason or "no match",
+                      "alternatives": hit.alternatives[:3],
+                      "warnings": hit.warnings}, is_error=True)
+    if hit.confirm:
+        url, more = api.absolute_or_relative(hit.url)
+        return _text({"opened": False, "ambiguous": True,
+                      "candidates": [{"id": hit.ref, "name": hit.name, "url": url,
+                                      "confidence": hit.confidence}] + hit.alternatives[:3],
+                      "next": "ask the user which one, then call celonis_open with its id",
+                      "warnings": hit.warnings + more})
+    return _opened(hit.name, hit.kind, hit.url, hit.ref, hit.warnings, confidence=hit.confidence)
+
+
+def read(args: dict) -> dict:
+    index = R.Index()
+    warnings: list[str] = []
+    if args.get("id"):
+        try:
+            entry = R.entry_for(args["id"], index)
+        except LookupError as err:
+            return _text({"answered": False, "reason": str(err)}, is_error=True)
+        try:
+            k, km = P.kpi_definition(entry, index)
+        except LookupError as err:
+            return _text({"answered": False, "reason": str(err),
+                          "url": api.absolute_or_relative(entry["url"])[0]}, is_error=True)
+        pql = args.get("pql") or k["pql"]
+    elif args.get("pql"):
+        pql = args["pql"]
+        km = R.km_for_ask(args["phrase"], index)
+    else:
+        hit = R.resolve(args["phrase"], index=index, verbose=False)
+        warnings = hit.warnings
+        if (hit.kind or "") != "kpi":
+            return _text({"answered": False,
+                          "reason": f'"{args["phrase"]}" resolved to '
+                                    f'{hit.kind or "nothing"}; read needs a KPI',
+                          "url": hit.url}, is_error=True)
+        found = P.find_kpi(hit.name, index)
+        if not found:
+            return _text({"answered": False, "reason": "no KPI definition matched"}, is_error=True)
+        k, km = found
+        pql = k["pql"]
+    tab = _tab()
+    if not tab:
+        return _text({"answered": False, "pql": pql, "reason": "no signed-in tab on the sandbox "
+                      "(run `celonis doctor`)"}, is_error=True)
+    out = P.execute(pql, km, index, tab)
+    if out.get("error"):
+        return _text({"answered": False, "pql": pql, "error": out["error"][:300]}, is_error=True)
+    return _text({"answered": True, "pql": P.pql_table(pql),
+                  "columns": out["columns"], "rows": out["rows"][:20],
+                  "query_ms": out["ms"], "warnings": warnings})
+
+
+def doctor(args: dict) -> dict:
+    lines = C.doctor(report=False)
+    return _text("\n".join(lines), is_error=any(l.startswith("FAIL") for l in lines))
+
+
+HANDLERS = {"celonis_search": search, "celonis_open": open_, "celonis_read": read,
+            "celonis_resolve": resolve, "celonis_doctor": doctor}
+
+
+def call(name: str, args: dict) -> dict:
+    run = HANDLERS.get(name)
+    if run is None:
         return _text(f"unknown tool: {name}", is_error=True)
+    args, bad = parse_args(name, args)
+    if bad:
+        return _text(bad, is_error=True)
+    try:
+        return run(args)
     except Exception as e:
-        return _text(f"{type(e).__name__}: {e}\n{traceback.format_exc()[-400:]}", is_error=True)
+        traceback.print_exc(file=sys.stderr)
+        return _text(f"{type(e).__name__}: {e}", is_error=True)
 
 
 def handle(msg: dict) -> dict | None:

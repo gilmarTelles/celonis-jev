@@ -47,6 +47,9 @@ with a tenant before it can resolve tenant-specific names.
 ```bash
 python3 celonis_cli.py doctor
 python3 celonis_index.py
+python3 celonis_cli.py search "<request>"
+python3 celonis_cli.py open --id <id>
+python3 celonis_cli.py read --id <KPI id>
 python3 celonis_cli.py resolve "<request>"
 python3 celonis_cli.py open "<request>"
 python3 celonis_cli.py view --no-open
@@ -61,16 +64,39 @@ python3 celonis_cli.py aliases
 python3 celonis_map.py --json
 ```
 
-`open` and `read` need a signed-in Chrome session with remote debugging. The
+`read` needs a signed-in Chrome session with remote debugging; `open` drives
+that session when it exists and prints the link when it does not. The
 workbench is the only path that sends SQL and its guard allows one `SELECT` or
 `WITH` statement only. Keep that boundary narrow.
 
-## Host integrations
+## Agent interface
 
-`omp/celonis.ts` exposes the CLI as omp tools. `celonis_mcp.py` exposes the same
-read-only surface over MCP. `python3 celonis_agent_setup.py --check` audits
-local wiring; the installer writes machine-specific configuration to ignored
-locations.
+MCP is the one agent interface. `celonis_mcp.py` is the server and `.mcp.json`
+wires it for any host that reads it. Five tools:
+
+| tool | what it does | Jev key |
+|---|---|---|
+| `celonis_search(phrase, k?)` | candidates with ids, one per kind and name; `copies` lists the other instances by container | no |
+| `celonis_open(id \| phrase)` | navigate the signed-in tab; the URL either way | only for a phrase that needs judgment |
+| `celonis_read(id \| phrase, pql?)` | run a KPI's PQL, return the rows | only for a phrase that needs judgment |
+| `celonis_resolve(phrase)` | one location, confidence, runner-ups with ids | when the phrase is ambiguous |
+| `celonis_doctor()` | what is missing and the command that fixes it | no |
+
+The flow is search, pick a candidate, then open or read it by id. An id is an
+index handle: a KPI's is `<model id>/<kpi id>` because package copies repeat
+the KPI id; every other kind uses its entry id. Search and open by id need
+only the local index, not even a tenant config. Read by id needs the tenant
+and a signed-in tab.
+
+A harness that can only run shell commands gets the same surface from the CLI:
+`search`, `open --id`, `read --id`, `resolve`. Both call the same functions in
+`celonis_resolve.py`, `celonis_pql.py` and `celonis_cli.py`; add behaviour
+there, not in one entry point.
+
+`python3 celonis_agent_setup.py --check` audits the MCP wiring for omp and
+Claude; the installer writes machine-specific configuration to ignored
+locations. `.claude/skills/verify-celonis` drives every entry point against the
+real tenant and keeps the evidence outside the checkout.
 
 ## Evaluation
 
@@ -95,5 +121,6 @@ outside; it never changes resolver behaviour.
 ## Verification
 
 There is no permanent test suite. Run the changed command or a focused smoke
-scenario, then run `python3 -m compileall -q .`. Do not commit generated tenant
+scenario (the verify-celonis skill has one recipe per feature), then run
+`python3 -m compileall -q .`. Do not commit generated tenant
 data merely to make a check pass.

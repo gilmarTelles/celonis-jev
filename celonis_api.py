@@ -18,11 +18,19 @@ ENV_FILE = Path.home() / ".celonis/environments.json"
 _env: dict | None = None
 
 
+class NoTenant(RuntimeError):
+    """environments.json is missing, unreadable, or has no sandbox stanza."""
+
+
 def env() -> dict:
     """The sandbox stanza of environments.json, read once per process."""
     global _env
     if _env is None:
-        _env = json.loads(ENV_FILE.read_text())["environments"]["sandbox"]
+        try:
+            _env = json.loads(ENV_FILE.read_text())["environments"]["sandbox"]
+        except (OSError, KeyError, TypeError, ValueError) as e:
+            raise NoTenant(f"no tenant configured (~/.celonis/environments.json: "
+                           f"{type(e).__name__}); run `celonis doctor`") from None
     return _env
 
 
@@ -45,3 +53,14 @@ def get(path: str, timeout: float = 60, **kw):
 def absolute(url: str) -> str:
     """A tenant-relative link, as a URL a browser can open."""
     return url if not url or url.startswith("http") else base() + url
+
+
+NO_TENANT = "no tenant configured (~/.celonis/environments.json); urls are tenant-relative"
+
+
+def absolute_or_relative(url: str) -> tuple[str, list[str]]:
+    """`absolute(url)`, or the url as given plus a warning when no tenant is configured."""
+    try:
+        return absolute(url), []
+    except (NoTenant, KeyError):
+        return url, [NO_TENANT]

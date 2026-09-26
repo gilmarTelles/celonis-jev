@@ -1,7 +1,7 @@
 """Natural language -> a Celonis location (and only when needed, an action).
 
     resolve("the view that shows tax credits by month")
-      -> {kind: board_v2, name: 'IBS/CBS Creditability Map', url: ..., confidence, alternatives}
+      -> {kind: board_v2, name: 'Tax Credit Monthly Overview', url: ..., confidence, alternatives}
 
 Pipeline, cheapest first:
 
@@ -45,6 +45,7 @@ INDEX = Path(__file__).with_name("celonis-index.json")
 COLUMNS = Path(__file__).with_name("celonis-columns.json")
 SHORTLIST = 10        # the first prompt: candidates are what a judgment costs
 SHORTLIST_FULL = 30   # re-asked only when the first pass refuses or is not sure
+MAX_COPIES = 10       # other instances a search candidate lists
 
 
 class T:
@@ -128,6 +129,15 @@ def in_container(entry: dict, ids: list[str] | tuple[str, ...]) -> bool:
     """Does this entry sit in one of those pools, spaces or packages (or is it one)?"""
     return any(c in (entry.get("id"), entry.get("poolId"), entry.get("spaceId"),
                      entry.get("packageId")) for c in ids)
+
+
+def ref(entry: dict) -> str:
+    """The handle a caller passes back to open or read one entry.
+
+    A KPI's id is its key inside a knowledge model, so package copies repeat it;
+    the model id makes it unique. Every other kind's id already is.
+    """
+    return f"{entry['model']}/{entry['id']}" if entry["kind"] == "kpi" else entry["id"]
 
 
 def phrase_key(phrase: str) -> str:
@@ -243,6 +253,7 @@ class Index:
         self.entries = blob["entries"]
         self.built = blob.get("built", "unknown")
         self.by_id = {e["id"]: e for e in self.entries}
+        self.by_ref = {ref(e): e for e in self.entries}
         self.vocab = vocab if vocab is not None else Vocab()
         self.columns = columns if columns is not None else Columns()
         self.df: dict[str, int] = {}
@@ -339,6 +350,57 @@ class Index:
                 for m in ms if m.get("packageId") == (a["container"] or {}).get("id")]
         picked = {id(m) for m in said}
         return said + [m for m in ms if id(m) not in picked]
+
+
+def entry_for(handle: str, index: Index) -> dict:
+    """The index entry a search candidate's `id` names."""
+    entry = index.by_ref.get(handle)
+    if entry is None:
+        raise LookupError(f"unknown id {handle!r}; search first (celonis_search, or "
+                          f"`celonis search`) and pass a candidate's id")
+    return entry
+
+
+def search(phrase: str, index: Index, k: int = 10) -> list[dict]:
+    """Candidates for a phrase, one per (kind, name), with the handle to open each.
+
+    Local and pure: no Jev, no tenant call. Entries sharing a kind and a name
+    collapse into their best-ranked representative. They are not always copies
+    (a table name repeats across pools with different data, a KPI name across
+    packages with different PQL), so `copies` lists the other instances with
+    their container, best first, up to MAX_COPIES, and `instances` counts them
+    all. A deterministic answer (alias, spelled-out name, named column) leads,
+    marked `exact`. The collapse lives here only: inside the Jev shortlist it
+    changes which answers get flagged for confirmation.
+    """
+    out: list[dict] = []
+    groups: dict[tuple[str, str], dict] = {}
+    shown: set[int] = set()
+
+    def add(score: float, e: dict, **extra) -> None:
+        out.append({"id": ref(e), "name": e["name"], "kind": e["kind"],
+                    "container": _trail_entry(e)["container"], "url": e["url"],
+                    "score": round(score, 2), "instances": 1, "copies": [], **extra})
+        groups[(e["kind"], e["name"])] = out[-1]
+        shown.add(id(e))
+
+    quick = decide(phrase, index)
+    if quick:
+        entry, why = quick
+        pinned = same_thing_in_container(phrase, entry, index)
+        entry = pinned[0] if pinned else entry
+        add(index.score(phrase, entry), entry, exact=True, why=path_for(why))
+    for score, e in index.top_scored(phrase, k=len(index.entries)):
+        if id(e) in shown:
+            continue
+        group = groups.get((e["kind"], e["name"]))
+        if group is not None:
+            group["instances"] += 1
+            if len(group["copies"]) < MAX_COPIES:
+                group["copies"].append({"id": ref(e), "container": _trail_entry(e)["container"]})
+        elif len(out) < k:
+            add(score, e)
+    return out
 
 
 class LookupUnavailable(RuntimeError):
@@ -471,7 +533,7 @@ def decide(phrase: str, index: "Index") -> tuple[dict, str] | None:
     * a word the column snapshot knows as a column, when the ask names a table and
       that column picks exactly one of them ('the table with the KTOSL field');
     * an entry whose name the ask spells out in full, when it is the only name the
-      ask contains ('tax jurisdiction map').
+      ask contains ('invoice aging overview').
 
     Everything else needs the judgment, and gets it.
     """
@@ -527,7 +589,7 @@ def questions(shortlist: list[dict], phrase: str = "") -> dict:
             "instructions": ("Which entry in `candidates` does the request refer to? Pick the entry "
                              "that IS the thing asked about, not one that merely relates to the same "
                              "subject or contains it. Match on meaning: 'the view that shows tax "
-                             "credits by month' may be named 'IBS/CBS Creditability Map'. Choose "
+                             "credits by month' may be named 'Tax Credit Monthly Overview'. Choose "
                              "`none` when no entry is the thing being asked about."),
             "criteria": opts,
         },
@@ -556,7 +618,7 @@ def _place(out: Resolution, entry: dict) -> None:
     """Copy the addressable fields of an index entry into a result."""
     out.name, out.kind, out.key = entry["name"], entry["kind"], entry.get("key")
     out.package, out.pool = entry.get("package"), entry.get("pool")
-    out.url, out.entity_id = entry["url"], entry.get("id")
+    out.url, out.entity_id, out.ref = entry["url"], entry.get("id"), ref(entry)
 
 
 def answer_from_entry(phrase: str, entry: dict, path: str, started: float, index: "Index",
@@ -779,7 +841,7 @@ def decide_match(phrase: str, answers: dict, short: list[dict], index: "Index") 
         # fallback is for: a thin index entry that little else in the list resembles.
         # It used to promote whatever came first, whatever its score, and dress it up
         # as `confirm: True`, which is how an ask for an alert that does not exist
-        # answered "Alert Control Manager" (the model had given it 0.05).
+        # answered with an unrelated alert board (the model had given it 0.05).
         #
         # Measured 17 Sep over the labelled set: the candidate a real ask needs never
         # scored below 0.26, and the best candidate of an ask with no target never
@@ -800,7 +862,6 @@ def decide_match(phrase: str, answers: dict, short: list[dict], index: "Index") 
 def resolve(phrase: str, client: jev.Jev | None = None, index: Index | None = None,
             verbose: bool = True, trace: "Trail | None" = None) -> Resolution:
     trace = trace or NO_TRACE
-    client = client or jev.Jev()
     index = index or Index()
     started = time.perf_counter()
     trace.begin(phrase, index)
@@ -848,6 +909,7 @@ def resolve(phrase: str, client: jev.Jev | None = None, index: Index | None = No
         trace.result(out)
         return out
 
+    client = client or jev.Jev()      # only now: every path above needs no key
     state, prompt = state_for(phrase, short), questions(short, phrase)
     answers, usage, secs, cached = client.ask(state, prompt)
     tokens_used, calls = usage["input_tokens"], 1
@@ -933,7 +995,7 @@ def resolve(phrase: str, client: jev.Jev | None = None, index: Index | None = No
                    else f"match confidence >= {T.MATCH}")
 
     result.alternatives = [
-        {"name": e["name"], "kind": e["kind"], "prob": round(p, 2), "url": e["url"]}
+        {"id": ref(e), "name": e["name"], "kind": e["kind"], "prob": round(p, 2), "url": e["url"]}
         for k, p, e in m.ranked
         if k != m.hit_slot and e["id"] != (chosen or {}).get("id")][:3]
     trace.result(result)

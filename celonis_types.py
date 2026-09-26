@@ -103,6 +103,7 @@ class Resolution:
     pool: str | None = None
     url: str | None = None
     entity_id: str | None = None
+    ref: str | None = None         # the id celonis_open / celonis_read take back
     intent: str = "open"
     exists: float = 1.0
     p_none: float = 0.0
