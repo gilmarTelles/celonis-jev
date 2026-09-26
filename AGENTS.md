@@ -124,7 +124,7 @@ outside; it never changes resolver behaviour.
 the request and the candidate list (names, kinds, containers) to Anthropic
 through the user's own Claude account via headless `claude -p` (no tools, no
 project settings, `--agent-model`, default `sonnet`), so it costs money: about
-two cents a case with sonnet. It is opt-in for that reason; the default stays
+one cent a case with sonnet (measured: $0.68 for 62 cases). It is opt-in for that reason; the default stays
 `code,jev`. Answers are recorded in `bench/agent-cache/`; `--live` reuses them
 unless `--fresh-agent` asks again, and `--offline` replays them without ever
 starting the CLI. Agent latency is reported as search plus the model turn, and
