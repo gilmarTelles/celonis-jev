@@ -21,6 +21,10 @@ PRICE_IN = 0.042  # USD per 1M input tokens, Jev as of 2026-09
 CACHE_DIR = Path(__file__).with_name("cache")
 
 
+class JevError(RuntimeError):
+    """No key, a refused request, or retries exhausted: the judgment cannot run."""
+
+
 def api_key() -> str:
     key = os.environ.get("TYPESAFE_API_KEY", "").strip()
     if key:
@@ -30,7 +34,7 @@ def api_key() -> str:
         for line in env.read_text().splitlines():
             if line.strip().startswith("TYPESAFE_API_KEY"):
                 return line.split("=", 1)[1].strip().strip('"').strip("'")
-    raise SystemExit("TYPESAFE_API_KEY not set and ~/.config/typesafe/env.sh missing")
+    raise JevError("TYPESAFE_API_KEY not set and ~/.config/typesafe/env.sh missing")
 
 
 def _digest(state, questions, model: str) -> str:
@@ -82,12 +86,12 @@ class Jev:
             except urllib.error.HTTPError as e:
                 last = f"HTTP {e.code}: {e.read()[:200].decode('utf-8', 'replace')}"
                 if e.code < 500 and e.code != 429:
-                    raise SystemExit(last)
+                    raise JevError(last)
             except Exception as e:  # transient network
                 last = repr(e)
             time.sleep(1.5 * (attempt + 1))
         else:
-            raise SystemExit(f"typesafe call failed: {last}")
+            raise JevError(f"typesafe call failed: {last}")
 
         latency = time.perf_counter() - started
         usage = payload["usage"]

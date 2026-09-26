@@ -43,6 +43,7 @@ import celonis_api
 import celonis_pql as P
 import celonis_resolve as R
 import cliargs
+import jev
 
 ENV = "develop"
 ALIASES = Path(__file__).with_name("celonis-aliases.json")
@@ -589,7 +590,11 @@ def main() -> int:
         print(__doc__)
         return 1
     pql = next((a for a in rest if a.startswith("TABLE(") or a.startswith("SUM(")), None)
-    return run(cmd, phrase, index, opts, flags, pql)
+    try:
+        return run(cmd, phrase, index, opts, flags, pql)
+    except jev.JevError as e:
+        print(e, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
